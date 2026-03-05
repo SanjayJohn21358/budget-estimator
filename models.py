@@ -84,6 +84,11 @@ class PricingGuide(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+def _is_lumber_category(category: str) -> bool:
+    """True if this material is in the lumber category (for length-based pricing)."""
+    return (category or "").strip().lower() == "lumber"
+
+
 class LineItemEntry(BaseModel):
     """A single material selection within a line item."""
 
@@ -92,11 +97,16 @@ class LineItemEntry(BaseModel):
     cost_per_unit: float = 0.0
     quantity: float = 0.0
     notes: str = ""
+    labor_hours: float = 0.0
+    # For lumber: length in feet per board; cost = cost_per_unit * quantity * length_feet
+    length_feet: Optional[float] = None
 
     @computed_field  # type: ignore[misc]
     @property
     def total_cost(self) -> float:
-        """Total cost for this entry = cost × quantity."""
+        """Total cost = cost × quantity, or for lumber cost × quantity × length_feet."""
+        if _is_lumber_category(self.category) and self.length_feet is not None and self.length_feet > 0:
+            return round(self.cost_per_unit * self.quantity * self.length_feet, 2)
         return round(self.cost_per_unit * self.quantity, 2)
 
 
@@ -117,7 +127,7 @@ class LineItem(BaseModel):
     # Dump runs
     dump_runs: int = 0
 
-    # Labor
+    # Labor (section-wide extra hours; most labor should be per-entry)
     labor_hours: float = 0.0
 
     def materials_total(self, config: CostConfig) -> float:
@@ -135,9 +145,10 @@ class LineItem(BaseModel):
         return round(self.dump_runs * config.dump_run_cost, 2)
 
     def labor_cost(self, config: CostConfig) -> float:
-        """Total labor cost = hours × rate × crew_size."""
+        """Total labor cost = (section + per-entry hours) × rate × crew_size."""
+        total_hours = self.labor_hours + sum(e.labor_hours for e in self.entries)
         return round(
-            self.labor_hours * config.labor_rate_per_hour * config.crew_size, 2
+            total_hours * config.labor_rate_per_hour * config.crew_size, 2
         )
 
     def total_element_price(self, config: CostConfig) -> float:
@@ -194,6 +205,9 @@ class ProjectEstimate(BaseModel):
         )
         dump_col = f"${config.dump_run_cost:.0f}/dump run"
 
+        if not self.line_items:
+            return pd.DataFrame()
+
         for li in self.line_items:
             entries = li.entries if li.entries else [None]  # type: ignore[list-item]
             for i, entry in enumerate(entries):
@@ -209,6 +223,14 @@ class ProjectEstimate(BaseModel):
                 else:
                     elem_text = li.element_notes or ""
 
+                # Labor hours: prefer per-entry hours, but include section-wide
+                if entry is not None:
+                    labor_hrs = entry.labor_hours
+                    if is_first and li.labor_hours:
+                        labor_hrs += li.labor_hours
+                else:
+                    labor_hrs = li.labor_hours if is_first else ""
+
                 rows.append(
                     {
                         "Line Item": li.name if is_first else "",
@@ -222,7 +244,7 @@ class ProjectEstimate(BaseModel):
                         "Dump Runs": li.dump_runs if is_first else "",
                         dump_col: li.dump_cost(config) if is_first else "",
                         "Dump Total": li.dump_cost(config) if is_first else "",
-                        "Labor Hours": li.labor_hours if is_first else "",
+                        "Labor Hours": labor_hrs,
                         labor_col: li.labor_cost(config) if is_first else "",
                         "Total Element Price": li.total_element_price(config) if is_first else "",
                         "Total Materials Cost": li.materials_total(config) if is_first else "",

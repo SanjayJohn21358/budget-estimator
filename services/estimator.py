@@ -172,13 +172,19 @@ class EstimatorService:
                 quantity=item.get("quantity", 0),
                 notes=item.get("notes", ""),
             )
+
+            # Optional per-entry labor hours
+            if "labor_hours" in item:
+                try:
+                    entry.labor_hours = float(item["labor_hours"])
+                except (TypeError, ValueError):
+                    entry.labor_hours = 0.0
+
             li.entries.append(entry)
 
             # Apply optional aggregate fields
             if "sq_ft" in item:
                 li.sq_ft += item["sq_ft"]
-            if "labor_hours" in item:
-                li.labor_hours += item["labor_hours"]
             if "dump_runs" in item:
                 li.dump_runs += item["dump_runs"]
 

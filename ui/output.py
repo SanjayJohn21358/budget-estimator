@@ -13,8 +13,9 @@ from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import inch
 from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
-from config import CostConfig, SheetConfig
+from config import CostConfig, LLMConfig, SheetConfig
 from models import ProjectEstimate
+from services.llm import LLMService
 from services.sheets import SheetsService
 
 
@@ -36,8 +37,9 @@ def render_output(
     estimate: ProjectEstimate,
     config: CostConfig,
     sheet_config: SheetConfig,
+    llm_config: LLMConfig | None = None,
 ) -> ProjectEstimate:
-    """Render the output estimate view with summary, editable cart, and export.
+    """Render the output estimate view with summary, editable cart, writeup, and export.
 
     Returns the (possibly modified) estimate so the caller can persist it.
     """
@@ -112,8 +114,15 @@ def render_output(
 
                 # Show labor / dump if present
                 extras: list[str] = []
-                if li.labor_hours > 0:
-                    extras.append(f"Labor: {li.labor_hours}h → ${li.labor_cost(config):,.2f}")
+
+                # Total labor hours = section-wide + per-entry
+                total_labor_hours = li.labor_hours + sum(
+                    e.labor_hours for e in li.entries
+                )
+                if total_labor_hours > 0:
+                    extras.append(
+                        f"Labor: {total_labor_hours}h → ${li.labor_cost(config):,.2f}"
+                    )
                 if li.dump_runs > 0:
                     extras.append(f"Dump runs: {li.dump_runs} → ${li.dump_cost(config):,.2f}")
                 if extras:
@@ -125,16 +134,67 @@ def render_output(
 
     df = estimate.to_summary_dataframe(config)
 
-    has_data = df.drop(columns=["Line Item"]).apply(
+    has_data = df.apply(
         lambda row: any(v != 0 and v != "" for v in row), axis=1
     )
     display_df = df[has_data] if has_data.any() else df
+
+    if display_df.empty:
+        st.info("No data to display")
+        _save(estimate)
+        return estimate
+
+    display_df['Sq Ft / LF / CY'] = pd.to_numeric(display_df['Sq Ft / LF / CY'], errors='coerce')
 
     st.dataframe(
         display_df,
         use_container_width=True,
         hide_index=True,
     )
+
+    # ---- Project writeup (client-facing proposal from line items) ----
+    st.markdown("---")
+    st.subheader("✉️ Project Writeup")
+    st.caption(
+        "Generate a client-ready email that walks through the estimate and "
+        "incorporates site access."
+    )
+
+    writeup_key = "output_writeup"
+    if writeup_key not in st.session_state:
+        st.session_state[writeup_key] = ""
+
+    col_gen, _ = st.columns([1, 3])
+    generate_clicked = col_gen.button("✨ Generate Writeup", type="primary")
+
+    if generate_clicked:
+        if not llm_config or not llm_config.openai_api_key:
+            st.warning(
+                "OpenAI API key is not configured. Add it to `.streamlit/secrets.toml` "
+                "under `[llm]` → `openai_api_key` to generate writeups."
+            )
+        elif not estimate.line_items:
+            st.warning("Add at least one section and items in the **Interactive Menu** to generate a writeup.")
+        else:
+            with st.spinner("Generating writeup…"):
+                try:
+                    llm = LLMService(llm_config)
+                    st.session_state[writeup_key] = llm.generate_project_writeup(
+                        estimate, config
+                    )
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Writeup generation failed: {e}")
+
+    writeup_text = st.session_state[writeup_key]
+
+    if st.session_state[writeup_key]:
+        st.download_button(
+            label="⬇️ Download writeup as .txt",
+            data=st.session_state[writeup_key],
+            file_name=f"writeup_{estimate.address or 'project'}_{datetime.now():%Y%m%d}.txt",
+            mime="text/plain",
+        )
 
     # ---- Export options ----
     st.markdown("---")

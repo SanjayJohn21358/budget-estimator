@@ -99,7 +99,8 @@ def _get_estimate(line_item_names: list[str]) -> ProjectEstimate:
 def _new_estimate(line_item_names: list[str]) -> ProjectEstimate:
     """Create a fresh empty estimate and persist it."""
     est = ProjectEstimate(
-        line_items=[LineItem(name=name) for name in line_item_names],
+        # Start with no sections; the user will add them from the UI.
+        line_items=[],
     )
     st.session_state["estimate"] = est.model_dump()
     return est
@@ -234,7 +235,9 @@ def main() -> None:
     )
 
     with tab_interactive:
-        estimate = render_interactive_mode(estimate, pricing_guide, cost_cfg)
+        estimate = render_interactive_mode(
+            estimate, pricing_guide, cost_cfg, line_item_names
+        )
 
     with tab_text:
         estimate = render_text_mode(
@@ -242,7 +245,9 @@ def main() -> None:
         )
 
     with tab_output:
-        estimate = render_output(estimate, cost_cfg, sheet_cfg)
+        estimate = render_output(
+            estimate, cost_cfg, sheet_cfg, llm_config=llm_cfg
+        )
 
     # Final save (catches any remaining in-tab mutations)
     _save_estimate(estimate)

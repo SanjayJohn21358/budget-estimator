@@ -7,6 +7,10 @@ import streamlit as st
 from config import CostConfig
 from models import LineItem, LineItemEntry, PricingGuide, ProjectEstimate
 
+# Lumber category check (must match models for length-based pricing)
+def _is_lumber(category: str) -> bool:
+    return (category or "").strip().lower() == "lumber"
+
 
 # ---------------------------------------------------------------------------
 # Session-state helpers (so mutations persist across reruns)
@@ -27,92 +31,60 @@ def render_interactive_mode(
     estimate: ProjectEstimate,
     pricing_guide: PricingGuide,
     config: CostConfig,
+    line_item_names: list[str],
 ) -> ProjectEstimate:
     """Render the cart-like interactive material picker."""
 
-    # ---- Add-to-cart section (always visible at top) ----
-    st.subheader("➕ Add Items")
+    # ---- Section management ----
+    st.subheader("📁 Sections")
 
-    # Category filter
-    category_names = list(pricing_guide.categories.keys())
-    line_item_names = [li.name for li in estimate.line_items]
+    # Section type options come from template names plus any existing section names
+    base_section_types = sorted(
+        {name for name in line_item_names} | {li.name for li in estimate.line_items}
+    ) or sorted(pricing_guide.categories.keys())
 
-    col_cat, col_mat = st.columns(2)
+    with st.expander("➕ Add Section", expanded=not estimate.line_items):
+        col_type, col_name = st.columns(2)
+        section_type = col_type.selectbox(
+            "Section Type",
+            options=base_section_types,
+            key="new_section_type",
+            help="Choose the base category for this section",
+        )
+        section_name = col_name.text_input(
+            "Section Name (optional)",
+            key="new_section_name",
+            placeholder="e.g. Front Yard Cleanup",
+        )
 
-    selected_category = col_cat.selectbox(
-        "Material Category",
-        options=["All Categories"] + category_names,
-        key="add_category",
-        help="Filter the material list by category from your pricing guide",
-    )
+        section_description = st.text_input(
+            "Section Description (optional)",
+            key="new_section_description",
+            placeholder="Short notes about this section",
+        )
 
-    # Build filtered material list
-    if selected_category == "All Categories":
-        filtered_materials = pricing_guide.all_materials
-    else:
-        filtered_materials = pricing_guide.categories.get(selected_category, [])
+        if st.button("Create Section", type="primary", key="create_section_btn"):
+            base = section_type.strip() or "Section"
+            # Count existing sections of this base type to build a default name
+            same_type_count = sum(1 for li in estimate.line_items if li.name == base)
+            auto_name = f"{base} {same_type_count + 1}"
+            stored_name = section_name.strip() or auto_name
 
-    material_options = [m.display_label() for m in filtered_materials]
-    material_name_map: dict[str, str] = {
-        m.display_label(): m.name for m in filtered_materials
-    }
-
-    selected_material_label = col_mat.selectbox(
-        "Material",
-        options=["— Select a material —"] + material_options,
-        key="add_material",
-        help="Pick a material to add to your estimate",
-    )
-
-    col_li, col_qty, col_notes, col_btn = st.columns([2, 1, 2, 1])
-
-    target_line_item = col_li.selectbox(
-        "Add to Section",
-        options=line_item_names,
-        key="add_target_li",
-        help="Which line-item section should this go under?",
-    )
-
-    new_qty = col_qty.number_input(
-        "Quantity",
-        min_value=0.01,
-        value=1.0,
-        step=1.0,
-        key="add_qty",
-    )
-
-    new_notes = col_notes.text_input(
-        "Notes (optional)",
-        key="add_notes",
-        placeholder="e.g. front yard only",
-    )
-
-    # Add button
-    col_btn.markdown("<br>", unsafe_allow_html=True)  # vertical alignment hack
-    if col_btn.button("🛒 Add to Cart", key="add_to_cart_btn", type="primary"):
-        if selected_material_label != "— Select a material —":
-            mat_name = material_name_map.get(selected_material_label, "")
-            mat = pricing_guide.get_material_by_name(mat_name)
-            if mat:
-                # Find the target line item
-                target_li = next(
-                    (li for li in estimate.line_items if li.name == target_line_item),
-                    None,
+            estimate.line_items.append(
+                LineItem(
+                    name=base,
+                    # Use notes as the human-friendly section name
+                    notes=stored_name,
+                    # Use element_notes as the description
+                    element_notes=section_description.strip(),
                 )
-                if target_li:
-                    target_li.entries.append(
-                        LineItemEntry(
-                            material_name=mat.name,
-                            category=mat.category,
-                            cost_per_unit=mat.cost_with_tax,
-                            quantity=new_qty,
-                            notes=new_notes,
-                        )
-                    )
-                    _save(estimate)
-                    st.rerun()
-        else:
-            st.warning("Please select a material first.")
+            )
+            _save(estimate)
+            st.rerun()
+
+    if not estimate.line_items:
+        st.info("No sections yet. Use **Add Section** above to get started.")
+        return estimate
 
     # ---- Cart contents ----
     st.markdown("---")
@@ -128,32 +100,154 @@ def render_interactive_mode(
             "a project description."
         )
 
+    # Precompute category list for item pickers
+    category_names = list(pricing_guide.categories.keys())
+
     # Render each line item section
+    type_counters: dict[str, int] = {}
     for li_idx, li in enumerate(estimate.line_items):
         entry_count = len(li.entries)
         section_total = li.total_element_price(config)
         has_content = entry_count > 0 or li.labor_hours > 0 or li.dump_runs > 0
 
+        # Derive a user-friendly display name
+        base_type = li.name
+        type_counters[base_type] = type_counters.get(base_type, 0) + 1
+        ordinal = type_counters[base_type]
+
+        if li.notes:
+            display_name = li.notes
+            subtitle = f" · {base_type}"
+        elif ordinal > 1:
+            display_name = f"{base_type} {ordinal}"
+            subtitle = ""
+        else:
+            display_name = base_type
+            subtitle = ""
+
         badge = f" — **${section_total:,.2f}**" if has_content else ""
-        label = f"**{li.name}** ({entry_count} item{'s' if entry_count != 1 else ''}){badge}"
+        label = (
+            f"**{display_name}**{subtitle} "
+            f"({entry_count} item{'s' if entry_count != 1 else ''}){badge}"
+        )
 
         with st.expander(label, expanded=has_content):
+            # ---- Add item to this section ----
+            st.markdown("**Add Item to this Section**")
+
+            add_col_cat, add_col_mat = st.columns(2)
+            selected_category = add_col_cat.selectbox(
+                "Material Category",
+                options=["All Categories"] + category_names,
+                key=f"cat_{li_idx}",
+            )
+
+            if selected_category == "All Categories":
+                filtered_materials = pricing_guide.all_materials
+            else:
+                filtered_materials = pricing_guide.categories.get(
+                    selected_category, []
+                )
+
+            material_options = [m.display_label() for m in filtered_materials]
+            material_name_map: dict[str, str] = {
+                m.display_label(): m.name for m in filtered_materials
+            }
+
+            selected_material_label = add_col_mat.selectbox(
+                "Material",
+                options=["— Select a material —"] + material_options,
+                key=f"mat_{li_idx}",
+                help="Pick a material to add to this section",
+            )
+
+            # Detect lumber so we can show length (ft) field
+            selected_mat = None
+            if selected_material_label != "— Select a material —":
+                mat_name = material_name_map.get(selected_material_label, "")
+                selected_mat = pricing_guide.get_material_by_name(mat_name)
+            is_lumber = selected_mat and _is_lumber(selected_mat.category)
+
+            add_col_qty, add_col_notes, add_col_labor, add_col_btn = st.columns(
+                [1, 2, 1, 1]
+            )
+
+            new_qty = add_col_qty.number_input(
+                "Quantity",
+                min_value=0.01,
+                value=1.0,
+                step=1.0,
+                key=f"add_qty_{li_idx}",
+            )
+
+            new_notes = add_col_notes.text_input(
+                "Notes (optional)",
+                key=f"notes_{li_idx}",
+                placeholder="e.g. front yard only",
+            )
+
+            labor_options = [0.0, 0.5, 1.0, 2.0, 3.0, 4.0, 6.0, 8.0]
+            selected_labor = add_col_labor.selectbox(
+                "Labor Hours (for this item)",
+                options=labor_options,
+                key=f"labor_item_{li_idx}",
+                help="Labor hours associated with this specific item",
+            )
+
+            # Lumber: feet per board (cost = cost_per_unit × quantity × length_feet)
+            new_length_feet: float | None = None
+            if is_lumber:
+                new_length_feet = st.number_input(
+                    "Length (ft per board)",
+                    min_value=0.01,
+                    value=8.0,
+                    step=0.5,
+                    key=f"add_length_ft_{li_idx}",
+                    help="Feet per board; cost = unit price × quantity × length",
+                )
+
+            add_col_btn.markdown(
+                "<br>", unsafe_allow_html=True
+            )  # vertical alignment hack
+            if add_col_btn.button(
+                "Add Item", key=f"add_item_{li_idx}", type="primary"
+            ):
+                if selected_material_label != "— Select a material —" and selected_mat:
+                    li.entries.append(
+                        LineItemEntry(
+                            material_name=selected_mat.name,
+                            category=selected_mat.category,
+                            cost_per_unit=selected_mat.cost_with_tax,
+                            quantity=new_qty,
+                            notes=new_notes,
+                            labor_hours=float(selected_labor),
+                            length_feet=new_length_feet if is_lumber else None,
+                        )
+                    )
+                    _save(estimate)
+                    st.rerun()
+                else:
+                    st.warning("Please select a material first.")
+
             # ---- Material entries table ----
             if li.entries:
-                # Header row
-                hdr1, hdr2, hdr3, hdr4, hdr5, hdr6 = st.columns(
-                    [3, 1.5, 1.2, 1.5, 2, 0.6]
+                # Header row (Length (ft) for lumber)
+                hdr1, hdr2, hdr3, hdr4, hdr5, hdr6, hdr7, hdr8 = st.columns(
+                    [3, 1.5, 1.0, 1.0, 1.5, 1.2, 1.6, 0.6]
                 )
                 hdr1.markdown("**Material**")
                 hdr2.markdown("**Unit Cost**")
                 hdr3.markdown("**Qty**")
-                hdr4.markdown("**Subtotal**")
-                hdr5.markdown("**Notes**")
-                hdr6.markdown("**Del**")
+                hdr4.markdown("**Length (ft)**")
+                hdr5.markdown("**Subtotal**")
+                hdr6.markdown("**Labor Hrs**")
+                hdr7.markdown("**Notes**")
+                hdr8.markdown("**Del**")
 
                 for e_idx, entry in enumerate(li.entries):
-                    c1, c2, c3, c4, c5, c6 = st.columns(
-                        [3, 1.5, 1.2, 1.5, 2, 0.6]
+                    is_lumber_entry = _is_lumber(entry.category)
+                    c1, c2, c3, c4, c5, c6, c7, c8 = st.columns(
+                        [3, 1.5, 1.0, 1.0, 1.5, 1.2, 1.6, 0.6]
                     )
                     c1.write(entry.material_name)
                     c2.write(f"${entry.cost_per_unit:,.2f}")
@@ -170,10 +264,39 @@ def render_interactive_mode(
                         entry.quantity = updated_qty
                         _save(estimate)
 
-                    c4.write(f"**${entry.total_cost:,.2f}**")
-                    c5.write(entry.notes or "—")
+                    if is_lumber_entry:
+                        len_val = entry.length_feet if entry.length_feet is not None else 0.0
+                        updated_len = c4.number_input(
+                            "Length (ft)",
+                            min_value=0.0,
+                            value=len_val,
+                            step=0.5,
+                            key=f"cart_len_{li_idx}_{e_idx}",
+                            label_visibility="collapsed",
+                        )
+                        if updated_len != (entry.length_feet or 0):
+                            entry.length_feet = updated_len if updated_len > 0 else None
+                            _save(estimate)
+                    else:
+                        c4.write("—")
 
-                    if c6.button("🗑️", key=f"del_{li_idx}_{e_idx}"):
+                    c5.write(f"**${entry.total_cost:,.2f}**")
+
+                    updated_labor = c6.number_input(
+                        "Labor Hrs (item)",
+                        min_value=0.0,
+                        value=entry.labor_hours,
+                        step=0.5,
+                        key=f"cart_labor_{li_idx}_{e_idx}",
+                        label_visibility="collapsed",
+                    )
+                    if updated_labor != entry.labor_hours:
+                        entry.labor_hours = updated_labor
+                        _save(estimate)
+
+                    c7.write(entry.notes or "—")
+
+                    if c8.button("🗑️", key=f"del_{li_idx}_{e_idx}"):
                         li.entries.pop(e_idx)
                         _save(estimate)
                         st.rerun()
@@ -219,7 +342,7 @@ def render_interactive_mode(
 
             # ---- Labor & dump runs ----
             st.markdown("**Labor & Dump Runs**")
-            d1, d2, d3, d4 = st.columns(4)
+            d1, d2, d3 = st.columns(3)
             li.dump_runs = int(
                 d1.number_input(
                     "Dump Runs",
@@ -230,25 +353,17 @@ def render_interactive_mode(
                 )
             )
             d2.write(f"Dump cost: **${li.dump_cost(config):,.2f}**")
-
-            li.labor_hours = d3.number_input(
-                "Labor Hours",
-                min_value=0.0,
-                value=li.labor_hours,
-                step=0.5,
-                key=f"labor_{li_idx}",
-            )
-            d4.write(f"Labor cost: **${li.labor_cost(config):,.2f}**")
+            d3.write(f"Labor cost: **${li.labor_cost(config):,.2f}**")
 
             # ---- Notes ----
             n1, n2 = st.columns(2)
             li.notes = n1.text_input(
-                "Section Notes",
+                "Section Name",
                 value=li.notes,
                 key=f"li_notes_{li_idx}",
             )
             li.element_notes = n2.text_input(
-                "Element Notes",
+                "Section Description",
                 value=li.element_notes,
                 key=f"li_elem_{li_idx}",
             )

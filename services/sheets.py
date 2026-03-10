@@ -86,17 +86,42 @@ class SheetsService:
                 continue
 
             # Detect category header: name present but cost columns are empty
-            if not cost_raw and not retail_raw:
+            if not retail_tax_raw:
                 current_category = name
                 if current_category not in categories:
                     categories[current_category] = []
                 continue
 
-            # Parse numeric fields safely
-            cost = _parse_float(cost_raw)
-            cost_with_tax = _parse_float(cost_tax_raw)
-            retail = _parse_float(retail_raw)
-            retail_with_tax = _parse_float(retail_tax_raw)
+            # Parse numeric fields safely, supporting ranges like "10-20"
+            (
+                cost,
+                cost_min,
+                cost_max,
+            ) = _parse_price_range(cost_raw)
+            (
+                cost_with_tax,
+                cost_with_tax_min,
+                cost_with_tax_max,
+            ) = _parse_price_range(cost_tax_raw)
+            (
+                retail,
+                retail_min,
+                retail_max,
+            ) = _parse_price_range(retail_raw)
+            (
+                retail_with_tax,
+                retail_with_tax_min,
+                retail_with_tax_max,
+            ) = _parse_price_range(retail_tax_raw)
+
+            # Derive a simple unit hint from the notes column so the UI can
+            # expose the right input (feet vs square feet).
+            unit_hint = ""
+            notes_lower = notes.lower()
+            if "1 ft" in notes_lower:
+                unit_hint = "ft"
+            elif "1 sf" in notes_lower:
+                unit_hint = "sf"
 
             material = Material(
                 name=name,
@@ -105,6 +130,15 @@ class SheetsService:
                 cost_with_tax=cost_with_tax,
                 retail=retail,
                 retail_with_tax=retail_with_tax,
+                cost_min=cost_min,
+                cost_max=cost_max,
+                cost_with_tax_min=cost_with_tax_min,
+                cost_with_tax_max=cost_with_tax_max,
+                retail_min=retail_min,
+                retail_max=retail_max,
+                retail_with_tax_min=retail_with_tax_min,
+                retail_with_tax_max=retail_with_tax_max,
+                unit_hint=unit_hint,
                 notes=notes,
                 vendor=vendor,
                 price_updated_on=price_updated,
@@ -343,9 +377,49 @@ class SheetsService:
 def _parse_float(value: str) -> float:
     """Safely parse a string to float, returning 0.0 on failure."""
     try:
-        # Remove currency symbols, commas, whitespace
         cleaned = value.replace("$", "").replace(",", "").strip()
         return float(cleaned) if cleaned else 0.0
     except (ValueError, TypeError):
         return 0.0
+
+
+def _parse_price_range(value: str) -> tuple[float, float | None, float | None]:
+    """Parse a price cell that may contain a range like '10-20'.
+
+    Returns:
+        (default_value, min_value, max_value)
+        - default_value: single numeric value used as the default unit price.
+          For ranges, this is the midpoint between min and max.
+        - min_value / max_value: None if the cell is not a range.
+    """
+    if not value:
+        return 0.0, None, None
+
+    # Normalize common formatting
+    cleaned = (
+        value.replace("$", "")
+        .replace(",", "")
+        .replace("–", "-")  # en dash → hyphen
+        .strip()
+    )
+
+    # Attempt to detect a range "min-max"
+    if "-" in cleaned:
+        parts = [p.strip() for p in cleaned.split("-") if p.strip()]
+        if len(parts) >= 2:
+            try:
+                v1 = float(parts[0])
+                v2 = float(parts[1])
+            except (ValueError, TypeError):
+                # Fall back to best-effort single float
+                single = _parse_float(cleaned)
+                return single, None, None
+
+            lo, hi = sorted((v1, v2))
+            midpoint = (lo + hi) / 2.0
+            return midpoint, lo, hi
+
+    # Not a range; parse as a single float
+    single_val = _parse_float(cleaned)
+    return single_val, None, None
 

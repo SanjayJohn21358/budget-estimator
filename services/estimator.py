@@ -25,7 +25,7 @@ class EstimatorService:
     ) -> LineItemEntry:
         """Create a LineItemEntry by looking up the material cost."""
         mat = self._pricing.get_material_by_name(material_name)
-        cost = mat.cost_with_tax if mat else 0.0
+        cost = mat.retail_with_tax if mat else 0.0
         category = mat.category if mat else ""
         return LineItemEntry(
             material_name=material_name,
@@ -56,10 +56,13 @@ class EstimatorService:
     # ------------------------------------------------------------------
 
     def recalculate_entry(self, entry: LineItemEntry) -> LineItemEntry:
-        """Refresh the cost_per_unit from the pricing guide."""
+        """Refresh the cost_per_unit from the pricing guide if not locked."""
+        if not entry.use_dynamic_pricing:
+            return entry
+
         mat = self._pricing.get_material_by_name(entry.material_name)
         if mat:
-            entry.cost_per_unit = mat.cost_with_tax
+            entry.cost_per_unit = mat.retail_with_tax
         return entry
 
     def recalculate_line_item(self, li: LineItem) -> LineItem:

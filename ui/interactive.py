@@ -161,19 +161,29 @@ def render_interactive_mode(
                 help="Pick a material to add to this section",
             )
 
-            # Detect lumber so we can show length (ft) field
+            # Detect unit behavior based on category and notes-derived hint
             selected_mat = None
             if selected_material_label != "— Select a material —":
                 mat_name = material_name_map.get(selected_material_label, "")
                 selected_mat = pricing_guide.get_material_by_name(mat_name)
-            is_lumber = selected_mat and _is_lumber(selected_mat.category)
+            unit_hint = (
+                (getattr(selected_mat, "unit_hint", "") or "").lower()
+                if selected_mat is not None
+                else ""
+            )
+            is_per_foot = bool(
+                selected_mat is not None
+                and (unit_hint == "ft" or _is_lumber(selected_mat.category))
+            )
+            is_per_sq_ft = bool(selected_mat is not None and unit_hint == "sf")
 
             add_col_qty, add_col_notes, add_col_labor, add_col_btn = st.columns(
                 [1, 2, 1, 1]
             )
 
+            qty_label = "Sq Ft" if is_per_sq_ft else "Quantity"
             new_qty = add_col_qty.number_input(
-                "Quantity",
+                qty_label,
                 min_value=0.01,
                 value=1.0,
                 step=1.0,
@@ -194,9 +204,42 @@ def render_interactive_mode(
                 help="Labor hours associated with this specific item",
             )
 
-            # Lumber: feet per board (cost = cost_per_unit × quantity × length_feet)
+            # Unit price: always allow a custom value, with a sensible default
+            chosen_unit_price: float | None = None
+            lock_price = False
+            if selected_mat is not None:
+                sheet_price = float(selected_mat.retail_with_tax or 0.0)
+                has_price_range = (
+                    selected_mat.retail_with_tax_min is not None
+                    and selected_mat.retail_with_tax_max is not None
+                )
+
+                if has_price_range:
+                    # Default to midpoint of the range (or sheet price if present)
+                    lo = float(selected_mat.retail_with_tax_min or 0.0)
+                    hi = float(selected_mat.retail_with_tax_max or 0.0)
+                    midpoint = sheet_price or (lo + hi) / 2.0
+                    default_price = midpoint
+                else:
+                    default_price = sheet_price
+
+                chosen_unit_price = st.number_input(
+                    "Unit Price",
+                    min_value=0.0,
+                    value=default_price,
+                    step=0.5,
+                    key=f"price_input_{li_idx}",
+                    help="Custom unit price for this material.",
+                )
+
+                # Lock the price if it differs from the sheet price or if this
+                # material came from a range.
+                if has_price_range or chosen_unit_price != sheet_price:
+                    lock_price = True
+
+            # Per-foot materials: feet per board (cost = unit price × quantity × length_feet)
             new_length_feet: float | None = None
-            if is_lumber:
+            if is_per_foot:
                 new_length_feet = st.number_input(
                     "Length (ft per board)",
                     min_value=0.01,
@@ -213,15 +256,24 @@ def render_interactive_mode(
                 "Add Item", key=f"add_item_{li_idx}", type="primary"
             ):
                 if selected_material_label != "— Select a material —" and selected_mat:
+                    # Fallback to sheet price if for some reason the custom
+                    # picker did not run (e.g. no price cell at all).
+                    unit_price = (
+                        chosen_unit_price
+                        if chosen_unit_price is not None and chosen_unit_price > 0
+                        else float(selected_mat.retail_with_tax or 0.0)
+                    )
                     li.entries.append(
                         LineItemEntry(
                             material_name=selected_mat.name,
                             category=selected_mat.category,
-                            cost_per_unit=selected_mat.cost_with_tax,
+                            cost_per_unit=unit_price,
                             quantity=new_qty,
                             notes=new_notes,
                             labor_hours=float(selected_labor),
-                            length_feet=new_length_feet if is_lumber else None,
+                            length_feet=new_length_feet if is_per_foot else None,
+                            use_dynamic_pricing=not lock_price,
+                            unit_type="area" if is_per_sq_ft else ("length" if is_per_foot else "piece"),
                         )
                     )
                     _save(estimate)
@@ -237,7 +289,7 @@ def render_interactive_mode(
                 )
                 hdr1.markdown("**Material**")
                 hdr2.markdown("**Unit Cost**")
-                hdr3.markdown("**Qty**")
+                hdr3.markdown("**Qty / Length**")
                 hdr4.markdown("**Length (ft)**")
                 hdr5.markdown("**Subtotal**")
                 hdr6.markdown("**Labor Hrs**")
@@ -307,38 +359,94 @@ def render_interactive_mode(
             else:
                 st.caption("No materials added to this section yet.")
 
-            # ---- Area / piece pricing (direct) ----
+            # ---- Custom Area / Piece materials (no section-level pricing) ----
             with st.popover("📐 Area / Piece Pricing (advanced)"):
-                cp1, cp2 = st.columns(2)
-                li.sq_ft = cp1.number_input(
-                    "Sq Ft / LF / CY",
-                    min_value=0.0,
-                    value=li.sq_ft,
-                    step=1.0,
-                    key=f"sqft_{li_idx}",
+                st.markdown("**Custom Material (Area / Piece)**")
+
+                # Custom material definition: lets users create ad-hoc materials
+                # that behave like normal entries in this section.
+                cm1, cm2 = st.columns(2)
+                custom_name = cm1.text_input(
+                    "Custom Material Name",
+                    key=f"custom_mat_name_{li_idx}",
+                    placeholder="e.g. Misc plantings",
                 )
-                li.price_per_sf = cp2.number_input(
-                    "$/sf",
-                    min_value=0.0,
-                    value=li.price_per_sf,
-                    step=0.01,
-                    key=f"psf_{li_idx}",
+                custom_category = cm2.text_input(
+                    "Category (optional)",
+                    key=f"custom_mat_cat_{li_idx}",
+                    placeholder="e.g. Plants/Lawn",
                 )
-                cp3, cp4 = st.columns(2)
-                li.quantity = cp3.number_input(
-                    "Quantity (pc)",
-                    min_value=0.0,
-                    value=li.quantity,
-                    step=1.0,
-                    key=f"qty_{li_idx}",
+
+                custom_pricing_mode = st.selectbox(
+                    "Pricing Type",
+                    options=["Per Piece", "Per Area (Sq Ft / LF / CY)"],
+                    key=f"custom_pricing_mode_{li_idx}",
                 )
-                li.price_per_pc = cp4.number_input(
-                    "$/pc",
-                    min_value=0.0,
-                    value=li.price_per_pc,
-                    step=0.01,
-                    key=f"ppc_{li_idx}",
+
+                if custom_pricing_mode == "Per Piece":
+                    cq1, cq2 = st.columns(2)
+                    custom_qty = cq1.number_input(
+                        "Quantity (pc)",
+                        min_value=0.0,
+                        value=0.0,
+                        step=1.0,
+                        key=f"custom_qty_pc_{li_idx}",
+                    )
+                    custom_unit_price = cq2.number_input(
+                        "$/pc",
+                        min_value=0.0,
+                        value=0.0,
+                        step=0.01,
+                        key=f"custom_price_pc_{li_idx}",
+                    )
+                else:
+                    cq1, cq2 = st.columns(2)
+                    custom_qty = cq1.number_input(
+                        "Area (Sq Ft / LF / CY)",
+                        min_value=0.0,
+                        value=0.0,
+                        step=1.0,
+                        key=f"custom_qty_area_{li_idx}",
+                    )
+                    custom_unit_price = cq2.number_input(
+                        "$ per unit area",
+                        min_value=0.0,
+                        value=0.0,
+                        step=0.01,
+                        key=f"custom_price_area_{li_idx}",
+                    )
+
+                custom_notes = st.text_input(
+                    "Custom Notes (optional)",
+                    key=f"custom_notes_{li_idx}",
+                    placeholder="Any details to show on the estimate",
                 )
+
+                if st.button(
+                    "Add Custom Material",
+                    type="primary",
+                    key=f"add_custom_material_{li_idx}",
+                    help="Create a custom material entry using the pricing above.",
+                ):
+                    if not custom_name:
+                        st.warning("Please enter a custom material name.")
+                    elif custom_qty <= 0 or custom_unit_price <= 0:
+                        st.warning("Quantity and unit price must be greater than zero.")
+                    else:
+                        li.entries.append(
+                            LineItemEntry(
+                                material_name=custom_name,
+                                category=custom_category or li.name,
+                                cost_per_unit=custom_unit_price,
+                                quantity=custom_qty,
+                                notes=custom_notes,
+                                use_dynamic_pricing=False,
+                                # Treat area-based customs as "length" for display
+                                unit_type="piece" if custom_pricing_mode == "Per Piece" else "length",
+                            )
+                        )
+                        _save(estimate)
+                        st.rerun()
 
             # ---- Labor & dump runs ----
             st.markdown("**Labor & Dump Runs**")

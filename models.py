@@ -24,6 +24,17 @@ class Material(BaseModel):
     cost_with_tax: float = 0.0
     retail: float = 0.0
     retail_with_tax: float = 0.0
+    # Optional range metadata when a sheet cell encodes a range like "10-20"
+    cost_min: Optional[float] = None
+    cost_max: Optional[float] = None
+    cost_with_tax_min: Optional[float] = None
+    cost_with_tax_max: Optional[float] = None
+    retail_min: Optional[float] = None
+    retail_max: Optional[float] = None
+    retail_with_tax_min: Optional[float] = None
+    retail_with_tax_max: Optional[float] = None
+    # Optional usage hint derived from the notes column, e.g. "ft" or "sf"
+    unit_hint: str = ""
     notes: str = ""
     vendor: str = ""
     price_updated_on: str = ""
@@ -33,7 +44,14 @@ class Material(BaseModel):
         parts = [self.name]
         if self.notes:
             parts.append(f"({self.notes})")
-        parts.append(f"— ${self.cost_with_tax:.2f}")
+        # Prefer showing the full range when available, otherwise a single price
+        if self.retail_with_tax_min is not None and self.retail_with_tax_max is not None:
+            price_text = (
+                f"${self.retail_with_tax_min:.2f}–${self.retail_with_tax_max:.2f}"
+            )
+        else:
+            price_text = f"${self.retail_with_tax:.2f}"
+        parts.append(f"— {price_text}")
         return " ".join(parts)
 
 
@@ -100,6 +118,10 @@ class LineItemEntry(BaseModel):
     labor_hours: float = 0.0
     # For lumber: length in feet per board; cost = cost_per_unit * quantity * length_feet
     length_feet: Optional[float] = None
+    # When False, estimator will not overwrite cost_per_unit from the pricing guide.
+    use_dynamic_pricing: bool = True
+    # Optional unit type for quantity, e.g. "piece", "area", "length"
+    unit_type: str = ""
 
     @computed_field  # type: ignore[misc]
     @property
@@ -213,42 +235,37 @@ class ProjectEstimate(BaseModel):
             for i, entry in enumerate(entries):
                 is_first = i == 0
 
+                if entry is None:
+                    continue
+
                 # Element w/ Notes: material name + entry notes
-                if entry is not None:
-                    elem_text = entry.material_name
-                    if entry.notes:
-                        elem_text += f" ({entry.notes})"
-                    if is_first and li.element_notes:
-                        elem_text += f" — {li.element_notes}"
-                else:
-                    elem_text = li.element_notes or ""
+                elem_text = entry.material_name
+                if entry.notes:
+                    elem_text += f" ({entry.notes})"
+                if is_first and li.element_notes:
+                    elem_text += f" — {li.element_notes}"
 
                 # Labor hours: prefer per-entry hours, but include section-wide
-                if entry is not None:
-                    labor_hrs = entry.labor_hours
-                    if is_first and li.labor_hours:
-                        labor_hrs += li.labor_hours
-                else:
-                    labor_hrs = li.labor_hours if is_first else ""
+                labor_hrs = entry.labor_hours if entry and entry.labor_hours else li.labor_hours if is_first else None
 
                 rows.append(
                     {
                         "Line Item": li.name if is_first else "",
                         "Notes": li.notes if is_first else "",
                         "Element w/ Notes": elem_text,
-                        "Sq Ft / LF / CY": li.sq_ft if is_first else "",
-                        "$/sf": li.price_per_sf if is_first else "",
-                        "Quantity": entry.quantity if entry else (li.quantity if is_first else ""),
-                        "$/pc": entry.cost_per_unit if entry else (li.price_per_pc if is_first else ""),
-                        "Total": entry.total_cost if entry else "",
-                        "Dump Runs": li.dump_runs if is_first else "",
-                        dump_col: li.dump_cost(config) if is_first else "",
-                        "Dump Total": li.dump_cost(config) if is_first else "",
+                        "Sq Ft / LF / CY": entry.length_feet if entry.length_feet else None,
+                        "Unit Type": entry.unit_type if entry and entry.unit_type else None,
+                        "Quantity": entry.quantity if entry else (li.quantity if is_first else None),
+                        "$/pc": entry.cost_per_unit if entry else (li.price_per_pc if is_first else None),
+                        "Total": entry.total_cost if entry else None,
+                        "Dump Runs": li.dump_runs if is_first else None,
+                        dump_col: li.dump_cost(config) if is_first else None,
+                        "Dump Total": li.dump_cost(config) if is_first else None,
                         "Labor Hours": labor_hrs,
-                        labor_col: li.labor_cost(config) if is_first else "",
-                        "Total Element Price": li.total_element_price(config) if is_first else "",
-                        "Total Materials Cost": li.materials_total(config) if is_first else "",
-                        "Total Labor Cost": li.labor_cost(config) if is_first else "",
+                        labor_col: li.labor_cost(config) if is_first else None,
+                        "Total Element Price": li.total_element_price(config) if is_first else None,
+                        "Total Materials Cost": li.materials_total(config) if is_first else None,
+                        "Total Labor Cost": li.labor_cost(config) if is_first else None,
                     }
                 )
         return pd.DataFrame(rows)

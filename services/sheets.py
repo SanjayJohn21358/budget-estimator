@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import json
+import re
 from typing import Any
 
 import gspread
@@ -10,7 +10,15 @@ import streamlit as st
 from google.oauth2.service_account import Credentials
 
 from config import CostConfig, SheetConfig
-from models import Material, PricingGuide, ProjectEstimate
+from models import (
+    AREA_HINTS,
+    LINEAR_HINTS,
+    LineItem,
+    LineItemEntry,
+    Material,
+    PricingGuide,
+    ProjectEstimate,
+)
 
 
 _SCOPES = [
@@ -114,14 +122,7 @@ class SheetsService:
                 retail_with_tax_max,
             ) = _parse_price_range(retail_tax_raw)
 
-            # Derive a simple unit hint from the notes column so the UI can
-            # expose the right input (feet vs square feet).
-            unit_hint = ""
-            notes_lower = notes.lower()
-            if "1 ft" in notes_lower:
-                unit_hint = "ft"
-            elif "1 sf" in notes_lower:
-                unit_hint = "sf"
+            unit_hint = _detect_unit_hint(notes)
 
             material = Material(
                 name=name,
@@ -179,6 +180,168 @@ class SheetsService:
                 seen.add(name)
 
         return line_items
+
+    # ------------------------------------------------------------------
+    # Import: list & load previously saved estimates
+    # ------------------------------------------------------------------
+
+    _ESTIMATE_TAB_PREFIX = "Estimate - "
+
+    def list_saved_estimates(self) -> list[dict[str, Any]]:
+        """Return tabs in the estimates workbook that look like exported estimates.
+
+        Only tabs whose title starts with ``"Estimate - "`` are included
+        (matching the naming convention used by ``export_estimate_to_sheet``).
+        Results are sorted most-recent-first (reverse alphabetical, since
+        titles end with a date).
+        """
+        target_id = (
+            self._config.estimates_sheet_id
+            or self._config.output_template_sheet_id
+        )
+        if not target_id:
+            return []
+
+        client = self._get_client()
+        spreadsheet = client.open_by_key(target_id)
+
+        results: list[dict[str, Any]] = []
+        for ws in spreadsheet.worksheets():
+            if ws.title.startswith(self._ESTIMATE_TAB_PREFIX):
+                results.append({"title": ws.title, "gid": ws.id})
+
+        results.sort(key=lambda d: d["title"], reverse=True)
+        return results
+
+    def import_estimate_from_sheet(
+        self,
+        tab_title: str,
+        pricing_guide: PricingGuide | None = None,
+    ) -> ProjectEstimate:
+        """Read a previously exported estimate tab and reconstruct a ProjectEstimate.
+
+        Args:
+            tab_title: Name of the worksheet tab to import.
+            pricing_guide: If provided, used to resolve ``unit_hint`` for
+                materials so area/linear entries are reconstructed accurately.
+
+        Returns:
+            A fully populated ``ProjectEstimate`` with
+            ``use_dynamic_pricing=False`` on every entry (prices are preserved
+            from the sheet).
+        """
+        target_id = (
+            self._config.estimates_sheet_id
+            or self._config.output_template_sheet_id
+        )
+        if not target_id:
+            raise ValueError("No estimates sheet ID configured.")
+
+        client = self._get_client()
+        spreadsheet = client.open_by_key(target_id)
+        ws = spreadsheet.worksheet(tab_title)
+        all_rows: list[list[str]] = ws.get_all_values()
+
+        if len(all_rows) < 4:
+            raise ValueError(
+                f"Tab '{tab_title}' has fewer than 4 rows — "
+                "it doesn't look like an exported estimate."
+            )
+
+        # ---- Header (row 2, 0-indexed row 1) ----
+        header_row = all_rows[1] if len(all_rows) > 1 else []
+        while len(header_row) < 10:
+            header_row.append("")
+
+        address = header_row[0].strip()                    # A2
+        budget = _parse_float(header_row[2])               # C2
+        easy_flag = header_row[4].strip().upper()          # E2
+        medium_flag = header_row[6].strip() if len(header_row) > 6 else ""  # G2
+        medium_flag = medium_flag.upper()
+
+        if medium_flag == "TRUE":
+            access_level = "Medium"
+        elif easy_flag == "TRUE":
+            access_level = "Easy"
+        else:
+            access_level = "Difficult"
+
+        # ---- Data rows (row 4+, 0-indexed row 3+) ----
+        data_rows = all_rows[3:]
+        line_items: list[LineItem] = []
+        current_li: LineItem | None = None
+
+        for row in data_rows:
+            while len(row) < 17:
+                row.append("")
+
+            li_name = row[0].strip()        # A – line item name
+            notes_col = row[1].strip()      # B – section name / notes
+            elem_col = row[2].strip()       # C – element w/ notes
+            area_raw = row[3].strip()       # D – Sq Ft / LF / CY
+            area_price_raw = row[4].strip() # E – $/sf
+            qty_raw = row[5].strip()        # F – Quantity
+            pc_price_raw = row[6].strip()   # G – $/pc
+            dump_raw = row[8].strip()       # I – Dump Runs
+            labor_raw = row[12].strip()     # M – Labor Hours
+
+            # New line-item group when column A has a value
+            if li_name:
+                current_li = LineItem(name=li_name)
+                if notes_col:
+                    current_li.notes = notes_col
+                if dump_raw:
+                    current_li.dump_runs = int(_parse_float(dump_raw))
+                line_items.append(current_li)
+
+            if current_li is None:
+                continue
+
+            # Skip rows with no element data
+            if not elem_col:
+                continue
+
+            # Parse "Material Name (notes) — section desc" back into parts
+            mat_name, entry_notes, elem_desc = _parse_element_text(elem_col)
+
+            if elem_desc and not current_li.element_notes:
+                current_li.element_notes = elem_desc
+
+            # Numeric columns
+            area_val = _parse_float(area_raw)
+            area_price = _parse_float(area_price_raw)
+            qty_val = _parse_float(qty_raw)
+            pc_price = _parse_float(pc_price_raw)
+            labor_hrs = _parse_float(labor_raw)
+
+            # Resolve unit hint from pricing guide if available
+            hint = ""
+            mat_category = ""
+            if pricing_guide and mat_name:
+                mat = pricing_guide.get_material_by_name(mat_name)
+                if mat:
+                    hint = mat.unit_hint or ""
+                    mat_category = mat.category or ""
+
+            entry = _build_entry_from_columns(
+                mat_name=mat_name,
+                category=mat_category,
+                entry_notes=entry_notes,
+                area_val=area_val,
+                area_price=area_price,
+                qty_val=qty_val,
+                pc_price=pc_price,
+                hint=hint,
+                labor_hours=labor_hrs,
+            )
+            current_li.entries.append(entry)
+
+        return ProjectEstimate(
+            address=address,
+            project_budget=budget,
+            access_level=access_level,
+            line_items=line_items,
+        )
 
     # ------------------------------------------------------------------
     # Export: duplicate template + fill in data
@@ -306,20 +469,36 @@ class SheetsService:
                 r = actual_start + i
                 is_first = i == 0
 
-                # Column C: material name + entry notes
                 if entries:
                     entry = entries[i]
                     elem_text = entry.material_name
                     if entry.notes:
                         elem_text += f" ({entry.notes})"
-                    # Append line-item element_notes on the first row
                     if is_first and li.element_notes:
                         elem_text += f" — {li.element_notes}"
-                    entry_qty = entry.quantity or ""
-                    entry_cost = entry.cost_per_unit or ""
+
+                    # Route area vs piece vs lumber to the right columns
+                    if entry.length_feet and entry.length_feet > 0:
+                        # Linear: total LF → area columns, board count → qty
+                        entry_area = entry.quantity * entry.length_feet
+                        entry_area_price = entry.cost_per_unit
+                        entry_qty = entry.quantity if entry.quantity > 0 else ""
+                        entry_cost = ""
+                    elif entry.area_value > 0:
+                        entry_area = entry.area_value
+                        entry_area_price = entry.price_per_area
+                        entry_qty = entry.quantity if entry.quantity > 0 else ""
+                        entry_cost = entry.cost_per_unit if entry.cost_per_unit > 0 else ""
+                    else:
+                        entry_area = ""
+                        entry_area_price = ""
+                        entry_qty = entry.quantity or ""
+                        entry_cost = entry.cost_per_unit or ""
                     entry_total = entry.total_cost or ""
                 else:
                     elem_text = li.element_notes or ""
+                    entry_area = li.sq_ft or ""
+                    entry_area_price = li.price_per_sf or ""
                     entry_qty = li.quantity or ""
                     entry_cost = li.price_per_pc or ""
                     entry_total = ""
@@ -327,8 +506,8 @@ class SheetsService:
                 # Template columns:
                 #   B = Notes           (first row only)
                 #   C = Element w/ notes (per entry)
-                #   D = Sq Ft / LF / CY (first row only)
-                #   E = $/sf            (first row only)
+                #   D = Sq Ft / LF / CY (per entry)
+                #   E = $/sf            (per entry)
                 #   F = Quantity         (per entry)
                 #   G = $/pc             (per entry)
                 #   H = Total materials  (per entry)
@@ -336,16 +515,22 @@ class SheetsService:
                 #   J = $/dump run       (first row only)
                 #   K = Total dump       (first row only)
                 #   L = (spacer)
-                #   M = Labor Hours      (first row only)
+                #   M = Labor Hours      (per entry; first row includes section-level)
                 #   N = Total Labor Cost (first row only)
                 #   O = Total element    (first row only)
                 #   P = Total Mat Cost   (first row only)
                 #   Q = Total Labor Cost (first row only)
+
+                # Per-entry labor; fold section-level hours into the first entry
+                entry_labor = entry.labor_hours if entries else 0.0
+                if is_first:
+                    entry_labor += li.labor_hours
+
                 row_values = [
                     li.notes if is_first else "",                        # B
                     elem_text,                                           # C
-                    (li.sq_ft or "") if is_first else "",                # D
-                    (li.price_per_sf or "") if is_first else "",         # E
+                    entry_area,                                          # D
+                    entry_area_price,                                    # E
                     entry_qty,                                           # F
                     entry_cost,                                          # G
                     entry_total,                                         # H
@@ -353,7 +538,7 @@ class SheetsService:
                     li.dump_cost(cost_config) if is_first else "",       # J
                     li.dump_cost(cost_config) if is_first else "",       # K
                     "",                                                  # L
-                    (li.labor_hours or "") if is_first else "",          # M
+                    entry_labor or "",                                        # M
                     li.labor_cost(cost_config) if is_first else "",      # N
                     li.total_element_price(cost_config) if is_first else "",  # O
                     li.materials_total(cost_config) if is_first else "",      # P
@@ -372,6 +557,34 @@ class SheetsService:
             new_ws.batch_update(updates, value_input_option="USER_ENTERED")
 
         return f"{spreadsheet.url}#gid={new_ws.id}"
+
+
+# Patterns that map notes text to a canonical unit hint.  Checked in order;
+# the first match wins.  Each tuple is (compiled regex, hint string).
+_UNIT_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r"\bcu\.?\s*ft\.?\b"), "cuft"),   # cu.ft., cu ft, cuft
+    (re.compile(r"\bcu\.?\s*yd\.?\b"), "cuyd"),    # cu.yd., cu yd, cuyd
+    (re.compile(r"\bcy\b"), "cuyd"),               # CY shorthand
+    (re.compile(r"\bsf\b"), "sf"),                 # sf, SF
+    (re.compile(r"\bsq\.?\s*ft\.?\b"), "sf"),      # sq ft, sq.ft.
+    (re.compile(r"\byd\b"), "yd"),                  # yd (linear yard)
+    (re.compile(r"\bft\b"), "ft"),                  # ft
+    (re.compile(r"\blf\b"), "ft"),                  # LF (linear foot)
+]
+
+
+def _detect_unit_hint(notes: str) -> str:
+    """Derive a canonical unit hint from the notes column.
+
+    Returns one of: "ft", "sf", "yd", "cuft", "cuyd", or "" (unknown).
+    """
+    if not notes:
+        return ""
+    text = notes.lower()
+    for pattern, hint in _UNIT_PATTERNS:
+        if pattern.search(text):
+            return hint
+    return ""
 
 
 def _parse_float(value: str) -> float:
@@ -422,4 +635,84 @@ def _parse_price_range(value: str) -> tuple[float, float | None, float | None]:
     # Not a range; parse as a single float
     single_val = _parse_float(cleaned)
     return single_val, None, None
+
+
+def _parse_element_text(text: str) -> tuple[str, str, str]:
+    """Split an Element w/ Notes cell back into (material_name, notes, section_desc).
+
+    The export format is: ``"Material Name (notes) — section desc"``.
+    """
+    section_desc = ""
+    if " — " in text:
+        text, section_desc = text.split(" — ", 1)
+        section_desc = section_desc.strip()
+
+    notes = ""
+    if " (" in text and text.endswith(")"):
+        idx = text.rindex(" (")
+        notes = text[idx + 2 : -1].strip()
+        text = text[:idx].strip()
+
+    mat_name = text.strip()
+    return mat_name, notes, section_desc
+
+
+def _build_entry_from_columns(
+    *,
+    mat_name: str,
+    category: str,
+    entry_notes: str,
+    area_val: float,
+    area_price: float,
+    qty_val: float,
+    pc_price: float,
+    hint: str,
+    labor_hours: float = 0.0,
+) -> LineItemEntry:
+    """Reconstruct a LineItemEntry from the template column values.
+
+    Detection logic:
+    - If the pricing guide says the material is linear (hint in LINEAR_HINTS)
+      and both area and qty are present: linear entry (length = area / qty).
+    - If area > 0 and no linear hint: area entry.
+    - Otherwise: piece entry.
+    """
+    if hint in LINEAR_HINTS and area_val > 0 and qty_val > 0:
+        length = area_val / qty_val if qty_val else 0.0
+        return LineItemEntry(
+            material_name=mat_name,
+            category=category,
+            cost_per_unit=area_price,
+            quantity=qty_val,
+            length_feet=length,
+            unit_hint=hint,
+            notes=entry_notes,
+            labor_hours=labor_hours,
+            use_dynamic_pricing=False,
+        )
+
+    if area_val > 0 and area_price > 0:
+        return LineItemEntry(
+            material_name=mat_name,
+            category=category,
+            area_value=area_val,
+            price_per_area=area_price,
+            quantity=qty_val if qty_val > 0 else 0.0,
+            cost_per_unit=pc_price if pc_price > 0 else 0.0,
+            unit_hint=hint or "",
+            notes=entry_notes,
+            labor_hours=labor_hours,
+            use_dynamic_pricing=False,
+        )
+
+    return LineItemEntry(
+        material_name=mat_name,
+        category=category,
+        quantity=qty_val,
+        cost_per_unit=pc_price,
+        unit_hint=hint or "",
+        notes=entry_notes,
+        labor_hours=labor_hours,
+        use_dynamic_pricing=False,
+    )
 

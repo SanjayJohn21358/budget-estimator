@@ -98,13 +98,32 @@ class PricingGuide(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Estimate / output models
+# Unit hint → UI label mapping
 # ---------------------------------------------------------------------------
 
+UNIT_LABELS: dict[str, str] = {
+    "ft": "Linear Ft",
+    "sf": "Sq Ft",
+    "yd": "Yards",
+    "cuyd": "Cu Yd",
+    "cuft": "Cu Ft",
+}
 
-def _is_lumber_category(category: str) -> bool:
-    """True if this material is in the lumber category (for length-based pricing)."""
-    return (category or "").strip().lower() == "lumber"
+# Hints that represent area/volume pricing (use area_value + price_per_area)
+AREA_HINTS: frozenset[str] = frozenset({"sf", "yd", "cuyd", "cuft"})
+
+# Hints that represent per-linear-unit pricing (use quantity × cost_per_unit × length)
+LINEAR_HINTS: frozenset[str] = frozenset({"ft"})
+
+
+def unit_label(hint: str) -> str:
+    """Human-readable label for a unit hint, defaulting to 'Qty'."""
+    return UNIT_LABELS.get(hint, "Qty")
+
+
+# ---------------------------------------------------------------------------
+# Estimate / output models
+# ---------------------------------------------------------------------------
 
 
 class LineItemEntry(BaseModel):
@@ -112,24 +131,36 @@ class LineItemEntry(BaseModel):
 
     material_name: str = ""
     category: str = ""
+
+    # Piece-based pricing (maps to Quantity + $/pc columns)
     cost_per_unit: float = 0.0
     quantity: float = 0.0
+
+    # Area / linear / volume pricing (maps to Sq Ft/LF/CY + $/sf columns)
+    area_value: float = 0.0
+    price_per_area: float = 0.0
+
     notes: str = ""
     labor_hours: float = 0.0
-    # For lumber: length in feet per board; cost = cost_per_unit * quantity * length_feet
+    # Canonical unit hint: "ft", "sf", "yd", "cuyd", "cuft", or ""
+    unit_hint: str = ""
+    # For per-linear-unit materials: length per piece; cost = $/unit × qty × length
     length_feet: Optional[float] = None
-    # When False, estimator will not overwrite cost_per_unit from the pricing guide.
+    # When False, estimator will not overwrite prices from the pricing guide.
     use_dynamic_pricing: bool = True
-    # Optional unit type for quantity, e.g. "piece", "area", "length"
-    unit_type: str = ""
 
     @computed_field  # type: ignore[misc]
     @property
     def total_cost(self) -> float:
-        """Total cost = cost × quantity, or for lumber cost × quantity × length_feet."""
-        if _is_lumber_category(self.category) and self.length_feet is not None and self.length_feet > 0:
+        """Total cost combining area-based and piece-based pricing.
+
+        Lumber special case: cost_per_unit ($/ft) × quantity (boards) × length_feet.
+        """
+        if self.length_feet is not None and self.length_feet > 0 and self.cost_per_unit > 0:
             return round(self.cost_per_unit * self.quantity * self.length_feet, 2)
-        return round(self.cost_per_unit * self.quantity, 2)
+        area_total = self.area_value * self.price_per_area
+        piece_total = self.quantity * self.cost_per_unit
+        return round(area_total + piece_total, 2)
 
 
 class LineItem(BaseModel):
@@ -220,7 +251,7 @@ class ProjectEstimate(BaseModel):
         return round(self.project_budget - self.grand_total(config), 2)
 
     def to_summary_dataframe(self, config: CostConfig) -> pd.DataFrame:
-        """Build a summary DataFrame with one row per material entry."""
+        """Build a summary DataFrame matching the Google Sheets template columns."""
         rows: list[dict] = []
         labor_col = (
             f"Labor Cost (${config.labor_rate_per_hour:.0f}/hr × {config.crew_size})"
@@ -235,29 +266,60 @@ class ProjectEstimate(BaseModel):
             for i, entry in enumerate(entries):
                 is_first = i == 0
 
-                if entry is None:
-                    continue
+                # Element w/ Notes
+                if entry is not None:
+                    elem_text = entry.material_name
+                    if entry.notes:
+                        elem_text += f" ({entry.notes})"
+                    if is_first and li.element_notes:
+                        elem_text += f" — {li.element_notes}"
+                else:
+                    elem_text = li.element_notes or ""
 
-                # Element w/ Notes: material name + entry notes
-                elem_text = entry.material_name
-                if entry.notes:
-                    elem_text += f" ({entry.notes})"
-                if is_first and li.element_notes:
-                    elem_text += f" — {li.element_notes}"
+                # Per-entry column routing: area vs piece vs lumber
+                if entry is not None:
+                    if entry.length_feet and entry.length_feet > 0:
+                        # Linear: total LF → area column, board count → qty
+                        entry_area = entry.quantity * entry.length_feet
+                        entry_area_price = entry.cost_per_unit
+                        entry_qty = entry.quantity if entry.quantity > 0 else None
+                        entry_pc_price = None
+                    elif entry.area_value > 0:
+                        entry_area = entry.area_value
+                        entry_area_price = entry.price_per_area
+                        entry_qty = entry.quantity if entry.quantity > 0 else None
+                        entry_pc_price = entry.cost_per_unit if entry.cost_per_unit > 0 else None
+                    else:
+                        entry_area = None
+                        entry_area_price = None
+                        entry_qty = entry.quantity
+                        entry_pc_price = entry.cost_per_unit
+                    entry_total = entry.total_cost
+                else:
+                    entry_area = li.sq_ft if is_first and li.sq_ft else None
+                    entry_area_price = li.price_per_sf if is_first and li.price_per_sf else None
+                    entry_qty = li.quantity if is_first else None
+                    entry_pc_price = li.price_per_pc if is_first else None
+                    entry_total = None
 
-                # Labor hours: prefer per-entry hours, but include section-wide
-                labor_hrs = entry.labor_hours if entry and entry.labor_hours else li.labor_hours if is_first else None
+                # Labor hours
+                if entry is not None:
+                    labor_hrs = entry.labor_hours
+                    if is_first and li.labor_hours:
+                        labor_hrs += li.labor_hours
+                else:
+                    labor_hrs = li.labor_hours if is_first else None
 
                 rows.append(
                     {
                         "Line Item": li.name if is_first else "",
                         "Notes": li.notes if is_first else "",
                         "Element w/ Notes": elem_text,
-                        "Sq Ft / LF / CY": entry.length_feet if entry.length_feet else None,
-                        "Unit Type": entry.unit_type if entry and entry.unit_type else None,
-                        "Quantity": entry.quantity if entry else (li.quantity if is_first else None),
-                        "$/pc": entry.cost_per_unit if entry else (li.price_per_pc if is_first else None),
-                        "Total": entry.total_cost if entry else None,
+                        "Sq Ft / LF / CY": entry_area,
+                        "$/sf": entry_area_price,
+                        "Quantity": entry_qty,
+                        "$/pc": entry_pc_price,
+                        "Total": entry_total,
                         "Dump Runs": li.dump_runs if is_first else None,
                         dump_col: li.dump_cost(config) if is_first else None,
                         "Dump Total": li.dump_cost(config) if is_first else None,

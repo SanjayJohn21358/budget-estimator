@@ -8,7 +8,7 @@ from typing import Any
 from openai import OpenAI
 
 from config import CostConfig, LLMConfig
-from models import PricingGuide, ProjectEstimate
+from models import PricingGuide, ProjectEstimate, unit_label
 
 
 # ---------------------------------------------------------------------------
@@ -204,9 +204,16 @@ class LLMService:
                     parts.append(f"Dump runs: {li.dump_runs} (${li.dump_cost(config):,.2f})")
                 lines.append("; ".join(parts))
             for e in li.entries:
-                detail = f"- {e.material_name}: qty {e.quantity}"
                 if e.length_feet and e.length_feet > 0:
-                    detail += f", length {e.length_feet} ft"
+                    u = unit_label(e.unit_hint) if e.unit_hint else "ft"
+                    detail = f"- {e.material_name}: {e.quantity} pcs × {e.length_feet} {u}"
+                elif e.area_value > 0:
+                    u = unit_label(e.unit_hint) if e.unit_hint else "sq ft"
+                    detail = f"- {e.material_name}: {e.area_value} {u}"
+                    if e.quantity > 0:
+                        detail += f", qty {e.quantity}"
+                else:
+                    detail = f"- {e.material_name}: qty {e.quantity}"
                 if e.notes:
                     detail += f" — {e.notes}"
                 if e.labor_hours > 0:

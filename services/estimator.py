@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from config import CostConfig
-from models import LineItem, LineItemEntry, Material, PricingGuide, ProjectEstimate
+from models import LineItem, LineItemEntry, PricingGuide, ProjectEstimate
 
 
 class EstimatorService:
@@ -56,13 +56,16 @@ class EstimatorService:
     # ------------------------------------------------------------------
 
     def recalculate_entry(self, entry: LineItemEntry) -> LineItemEntry:
-        """Refresh the cost_per_unit from the pricing guide if not locked."""
+        """Refresh prices from the pricing guide if not locked."""
         if not entry.use_dynamic_pricing:
             return entry
 
         mat = self._pricing.get_material_by_name(entry.material_name)
         if mat:
-            entry.cost_per_unit = mat.retail_with_tax
+            if entry.area_value > 0 and entry.price_per_area > 0:
+                entry.price_per_area = mat.retail_with_tax
+            else:
+                entry.cost_per_unit = mat.retail_with_tax
         return entry
 
     def recalculate_line_item(self, li: LineItem) -> LineItem:

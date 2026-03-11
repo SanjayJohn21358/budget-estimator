@@ -5,11 +5,15 @@ from __future__ import annotations
 import streamlit as st
 
 from config import CostConfig
-from models import LineItem, LineItemEntry, PricingGuide, ProjectEstimate
-
-# Lumber category check (must match models for length-based pricing)
-def _is_lumber(category: str) -> bool:
-    return (category or "").strip().lower() == "lumber"
+from models import (
+    AREA_HINTS,
+    LINEAR_HINTS,
+    LineItem,
+    LineItemEntry,
+    PricingGuide,
+    ProjectEstimate,
+    unit_label,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -161,27 +165,24 @@ def render_interactive_mode(
                 help="Pick a material to add to this section",
             )
 
-            # Detect unit behavior based on category and notes-derived hint
+            # Detect unit behavior based on notes-derived hint
             selected_mat = None
             if selected_material_label != "— Select a material —":
                 mat_name = material_name_map.get(selected_material_label, "")
                 selected_mat = pricing_guide.get_material_by_name(mat_name)
-            unit_hint = (
+            mat_hint = (
                 (getattr(selected_mat, "unit_hint", "") or "").lower()
                 if selected_mat is not None
                 else ""
             )
-            is_per_foot = bool(
-                selected_mat is not None
-                and (unit_hint == "ft" or _is_lumber(selected_mat.category))
-            )
-            is_per_sq_ft = bool(selected_mat is not None and unit_hint == "sf")
+            is_linear = mat_hint in LINEAR_HINTS
+            is_area = mat_hint in AREA_HINTS
 
             add_col_qty, add_col_notes, add_col_labor, add_col_btn = st.columns(
                 [1, 2, 1, 1]
             )
 
-            qty_label = "Sq Ft" if is_per_sq_ft else "Quantity"
+            qty_label = unit_label(mat_hint) if is_area else "Quantity"
             new_qty = add_col_qty.number_input(
                 qty_label,
                 min_value=0.01,
@@ -237,16 +238,17 @@ def render_interactive_mode(
                 if has_price_range or chosen_unit_price != sheet_price:
                     lock_price = True
 
-            # Per-foot materials: feet per board (cost = unit price × quantity × length_feet)
+            # Linear-unit materials: length per piece (cost = $/unit × qty × length)
             new_length_feet: float | None = None
-            if is_per_foot:
+            if is_linear:
+                length_label = f"Length ({unit_label(mat_hint)} per piece)"
                 new_length_feet = st.number_input(
-                    "Length (ft per board)",
+                    length_label,
                     min_value=0.01,
                     value=8.0,
                     step=0.5,
                     key=f"add_length_ft_{li_idx}",
-                    help="Feet per board; cost = unit price × quantity × length",
+                    help="Length per piece; cost = unit price × quantity × length",
                 )
 
             add_col_btn.markdown(
@@ -256,26 +258,46 @@ def render_interactive_mode(
                 "Add Item", key=f"add_item_{li_idx}", type="primary"
             ):
                 if selected_material_label != "— Select a material —" and selected_mat:
-                    # Fallback to sheet price if for some reason the custom
-                    # picker did not run (e.g. no price cell at all).
                     unit_price = (
                         chosen_unit_price
                         if chosen_unit_price is not None and chosen_unit_price > 0
                         else float(selected_mat.retail_with_tax or 0.0)
                     )
-                    li.entries.append(
-                        LineItemEntry(
+
+                    if is_area:
+                        entry = LineItemEntry(
+                            material_name=selected_mat.name,
+                            category=selected_mat.category,
+                            area_value=new_qty,
+                            price_per_area=unit_price,
+                            unit_hint=mat_hint,
+                            notes=new_notes,
+                            labor_hours=float(selected_labor),
+                            use_dynamic_pricing=not lock_price,
+                        )
+                    elif is_linear:
+                        entry = LineItemEntry(
+                            material_name=selected_mat.name,
+                            category=selected_mat.category,
+                            cost_per_unit=unit_price,
+                            quantity=new_qty,
+                            unit_hint=mat_hint,
+                            length_feet=new_length_feet,
+                            notes=new_notes,
+                            labor_hours=float(selected_labor),
+                            use_dynamic_pricing=not lock_price,
+                        )
+                    else:
+                        entry = LineItemEntry(
                             material_name=selected_mat.name,
                             category=selected_mat.category,
                             cost_per_unit=unit_price,
                             quantity=new_qty,
                             notes=new_notes,
                             labor_hours=float(selected_labor),
-                            length_feet=new_length_feet if is_per_foot else None,
                             use_dynamic_pricing=not lock_price,
-                            unit_type="area" if is_per_sq_ft else ("length" if is_per_foot else "piece"),
                         )
-                    )
+                    li.entries.append(entry)
                     _save(estimate)
                     st.rerun()
                 else:
@@ -283,59 +305,86 @@ def render_interactive_mode(
 
             # ---- Material entries table ----
             if li.entries:
-                # Header row (Length (ft) for lumber)
-                hdr1, hdr2, hdr3, hdr4, hdr5, hdr6, hdr7, hdr8 = st.columns(
-                    [3, 1.5, 1.0, 1.0, 1.5, 1.2, 1.6, 0.6]
-                )
+                _col_w = [2.6, 0.9, 0.8, 0.8, 0.8, 1.1, 0.8, 1.4, 0.5]
+                (hdr1, hdr2, hdr3, hdr4, hdr5,
+                 hdr6, hdr7, hdr8, hdr9) = st.columns(_col_w)
                 hdr1.markdown("**Material**")
-                hdr2.markdown("**Unit Cost**")
-                hdr3.markdown("**Qty / Length**")
-                hdr4.markdown("**Length (ft)**")
-                hdr5.markdown("**Subtotal**")
-                hdr6.markdown("**Labor Hrs**")
-                hdr7.markdown("**Notes**")
-                hdr8.markdown("**Del**")
+                hdr2.markdown("**SqFt/LF**")
+                hdr3.markdown("**$/sf**")
+                hdr4.markdown("**Qty**")
+                hdr5.markdown("**$/pc**")
+                hdr6.markdown("**Total**")
+                hdr7.markdown("**Labor**")
+                hdr8.markdown("**Notes**")
+                hdr9.markdown("**Del**")
 
                 for e_idx, entry in enumerate(li.entries):
-                    is_lumber_entry = _is_lumber(entry.category)
-                    c1, c2, c3, c4, c5, c6, c7, c8 = st.columns(
-                        [3, 1.5, 1.0, 1.0, 1.5, 1.2, 1.6, 0.6]
+                    e_hint = entry.unit_hint or ""
+                    is_area_entry = e_hint in AREA_HINTS or (
+                        entry.area_value > 0 and entry.quantity == 0
                     )
-                    c1.write(entry.material_name)
-                    c2.write(f"${entry.cost_per_unit:,.2f}")
+                    has_length = entry.length_feet is not None and entry.length_feet > 0
 
-                    updated_qty = c3.number_input(
-                        "Qty",
-                        min_value=0.0,
-                        value=entry.quantity,
-                        step=1.0,
-                        key=f"cart_qty_{li_idx}_{e_idx}",
-                        label_visibility="collapsed",
-                    )
-                    if updated_qty != entry.quantity:
-                        entry.quantity = updated_qty
-                        _save(estimate)
+                    (c1, c2, c3, c4, c5,
+                     c6, c7, c8, c9) = st.columns(_col_w)
 
-                    if is_lumber_entry:
-                        len_val = entry.length_feet if entry.length_feet is not None else 0.0
-                        updated_len = c4.number_input(
-                            "Length (ft)",
+                    mat_display = entry.material_name
+                    if e_hint:
+                        mat_display += f"  `{unit_label(e_hint)}`"
+                    c1.write(mat_display)
+
+                    # -- Sq Ft / LF / CY column --
+                    if is_area_entry:
+                        updated_area = c2.number_input(
+                            "Area",
                             min_value=0.0,
-                            value=len_val,
-                            step=0.5,
-                            key=f"cart_len_{li_idx}_{e_idx}",
+                            value=entry.area_value,
+                            step=1.0,
+                            key=f"cart_area_{li_idx}_{e_idx}",
                             label_visibility="collapsed",
                         )
-                        if updated_len != (entry.length_feet or 0):
-                            entry.length_feet = updated_len if updated_len > 0 else None
+                        if updated_area != entry.area_value:
+                            entry.area_value = updated_area
                             _save(estimate)
+                    elif has_length:
+                        c2.write(f"{entry.quantity * (entry.length_feet or 0):.1f}")
                     else:
+                        c2.write("—")
+
+                    # -- $/sf column --
+                    if is_area_entry:
+                        c3.write(f"${entry.price_per_area:,.2f}")
+                    elif has_length:
+                        c3.write(f"${entry.cost_per_unit:,.2f}")
+                    else:
+                        c3.write("—")
+
+                    # -- Qty column --
+                    if is_area_entry and not has_length:
                         c4.write("—")
+                    else:
+                        updated_qty = c4.number_input(
+                            "Qty",
+                            min_value=0.0,
+                            value=entry.quantity,
+                            step=1.0,
+                            key=f"cart_qty_{li_idx}_{e_idx}",
+                            label_visibility="collapsed",
+                        )
+                        if updated_qty != entry.quantity:
+                            entry.quantity = updated_qty
+                            _save(estimate)
 
-                    c5.write(f"**${entry.total_cost:,.2f}**")
+                    # -- $/pc column --
+                    if not is_area_entry and not has_length:
+                        c5.write(f"${entry.cost_per_unit:,.2f}")
+                    else:
+                        c5.write("—")
 
-                    updated_labor = c6.number_input(
-                        "Labor Hrs (item)",
+                    c6.write(f"**${entry.total_cost:,.2f}**")
+
+                    updated_labor = c7.number_input(
+                        "Labor",
                         min_value=0.0,
                         value=entry.labor_hours,
                         step=0.5,
@@ -346,9 +395,9 @@ def render_interactive_mode(
                         entry.labor_hours = updated_labor
                         _save(estimate)
 
-                    c7.write(entry.notes or "—")
+                    c8.write(entry.notes or "—")
 
-                    if c8.button("🗑️", key=f"del_{li_idx}_{e_idx}"):
+                    if c9.button("🗑️", key=f"del_{li_idx}_{e_idx}"):
                         li.entries.pop(e_idx)
                         _save(estimate)
                         st.rerun()
@@ -433,18 +482,25 @@ def render_interactive_mode(
                     elif custom_qty <= 0 or custom_unit_price <= 0:
                         st.warning("Quantity and unit price must be greater than zero.")
                     else:
-                        li.entries.append(
-                            LineItemEntry(
+                        if custom_pricing_mode == "Per Piece":
+                            custom_entry = LineItemEntry(
                                 material_name=custom_name,
                                 category=custom_category or li.name,
                                 cost_per_unit=custom_unit_price,
                                 quantity=custom_qty,
                                 notes=custom_notes,
                                 use_dynamic_pricing=False,
-                                # Treat area-based customs as "length" for display
-                                unit_type="piece" if custom_pricing_mode == "Per Piece" else "length",
                             )
-                        )
+                        else:
+                            custom_entry = LineItemEntry(
+                                material_name=custom_name,
+                                category=custom_category or li.name,
+                                area_value=custom_qty,
+                                price_per_area=custom_unit_price,
+                                notes=custom_notes,
+                                use_dynamic_pricing=False,
+                            )
+                        li.entries.append(custom_entry)
                         _save(estimate)
                         st.rerun()
 
@@ -461,7 +517,11 @@ def render_interactive_mode(
                 )
             )
             d2.write(f"Dump cost: **${li.dump_cost(config):,.2f}**")
-            d3.write(f"Labor cost: **${li.labor_cost(config):,.2f}**")
+            total_hrs = li.labor_hours + sum(e.labor_hours for e in li.entries)
+            d3.write(
+                f"Labor: **{total_hrs:.1f}h** · "
+                f"**${li.labor_cost(config):,.2f}**"
+            )
 
             # ---- Notes ----
             n1, n2 = st.columns(2)

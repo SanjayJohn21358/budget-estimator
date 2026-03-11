@@ -14,7 +14,7 @@ from reportlab.lib.units import inch
 from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 from config import CostConfig, LLMConfig, SheetConfig
-from models import ProjectEstimate
+from models import AREA_HINTS, ProjectEstimate, unit_label
 from services.llm import LLMService
 from services.sheets import SheetsService
 
@@ -80,34 +80,85 @@ def render_output(
                 expanded=True,
             ):
                 if li.entries:
-                    # Header
-                    h1, h2, h3, h4, h5 = st.columns([3, 1.5, 1.2, 1.5, 0.6])
+                    _col_w = [2.8, 1.0, 0.8, 0.8, 0.8, 1.2, 0.5]
+                    h1, h2, h3, h4, h5, h6, h7 = st.columns(_col_w)
                     h1.markdown("**Material**")
-                    h2.markdown("**Unit Cost**")
-                    h3.markdown("**Qty**")
-                    h4.markdown("**Subtotal**")
-                    h5.markdown("**Del**")
+                    h2.markdown("**SqFt/LF**")
+                    h3.markdown("**$/sf**")
+                    h4.markdown("**Qty**")
+                    h5.markdown("**$/pc**")
+                    h6.markdown("**Total**")
+                    h7.markdown("**Del**")
 
                     for e_idx, entry in enumerate(li.entries):
-                        c1, c2, c3, c4, c5 = st.columns([3, 1.5, 1.2, 1.5, 0.6])
-                        c1.write(entry.material_name)
-                        c2.write(f"${entry.cost_per_unit:,.2f}")
-
-                        updated_qty = c3.number_input(
-                            "Qty",
-                            min_value=0.0,
-                            value=entry.quantity,
-                            step=1.0,
-                            key=f"out_qty_{li_idx}_{e_idx}",
-                            label_visibility="collapsed",
+                        e_hint = entry.unit_hint or ""
+                        is_area_entry = e_hint in AREA_HINTS or (
+                            entry.area_value > 0 and entry.quantity == 0
                         )
-                        if updated_qty != entry.quantity:
-                            entry.quantity = updated_qty
-                            _save(estimate)
+                        has_length = (
+                            entry.length_feet is not None and entry.length_feet > 0
+                        )
 
-                        c4.write(f"**${entry.total_cost:,.2f}**")
+                        c1, c2, c3, c4, c5, c6, c7 = st.columns(_col_w)
 
-                        if c5.button("🗑️", key=f"out_del_{li_idx}_{e_idx}"):
+                        mat_display = entry.material_name
+                        if e_hint:
+                            mat_display += f"  `{unit_label(e_hint)}`"
+                        c1.write(mat_display)
+
+                        # -- Sq Ft / LF / CY column --
+                        if is_area_entry:
+                            updated_area = c2.number_input(
+                                "Area",
+                                min_value=0.0,
+                                value=entry.area_value,
+                                step=1.0,
+                                key=f"out_area_{li_idx}_{e_idx}",
+                                label_visibility="collapsed",
+                            )
+                            if updated_area != entry.area_value:
+                                entry.area_value = updated_area
+                                _save(estimate)
+                        elif has_length:
+                            c2.write(
+                                f"{entry.quantity * (entry.length_feet or 0):.1f}"
+                            )
+                        else:
+                            c2.write("—")
+
+                        # -- $/sf column --
+                        if is_area_entry:
+                            c3.write(f"${entry.price_per_area:,.2f}")
+                        elif has_length:
+                            c3.write(f"${entry.cost_per_unit:,.2f}")
+                        else:
+                            c3.write("—")
+
+                        # -- Qty column --
+                        if is_area_entry and not has_length:
+                            c4.write("—")
+                        else:
+                            updated_qty = c4.number_input(
+                                "Qty",
+                                min_value=0.0,
+                                value=entry.quantity,
+                                step=1.0,
+                                key=f"out_qty_{li_idx}_{e_idx}",
+                                label_visibility="collapsed",
+                            )
+                            if updated_qty != entry.quantity:
+                                entry.quantity = updated_qty
+                                _save(estimate)
+
+                        # -- $/pc column --
+                        if not is_area_entry and not has_length:
+                            c5.write(f"${entry.cost_per_unit:,.2f}")
+                        else:
+                            c5.write("—")
+
+                        c6.write(f"**${entry.total_cost:,.2f}**")
+
+                        if c7.button("🗑️", key=f"out_del_{li_idx}_{e_idx}"):
                             li.entries.pop(e_idx)
                             _save(estimate)
                             st.rerun()
@@ -135,7 +186,7 @@ def render_output(
     df = estimate.to_summary_dataframe(config)
 
     has_data = df.apply(
-        lambda row: any(v != 0 and v != "" for v in row), axis=1
+        lambda row: any(v is not None and v != 0 and v != "" for v in row), axis=1
     )
     display_df = df[has_data] if has_data.any() else df
 
@@ -143,8 +194,6 @@ def render_output(
         st.info("No data to display")
         _save(estimate)
         return estimate
-
-    display_df['Sq Ft / LF / CY'] = pd.to_numeric(display_df['Sq Ft / LF / CY'], errors='coerce')
 
     st.dataframe(
         display_df,
@@ -185,8 +234,6 @@ def render_output(
                     st.rerun()
                 except Exception as e:
                     st.error(f"Writeup generation failed: {e}")
-
-    writeup_text = st.session_state[writeup_key]
 
     if st.session_state[writeup_key]:
         st.download_button(

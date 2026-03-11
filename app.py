@@ -5,7 +5,7 @@ from __future__ import annotations
 import streamlit as st
 
 from config import AppConfig, CostConfig, LLMConfig, SheetConfig
-from models import LineItem, PricingGuide, ProjectEstimate
+from models import PricingGuide, ProjectEstimate
 from services.estimator import EstimatorService
 from services.sheets import SheetsService
 from ui.interactive import render_interactive_mode
@@ -81,6 +81,13 @@ def _load_template_line_items(_sheet_config: SheetConfig) -> list[str]:
     return service.load_template_line_items()
 
 
+@st.cache_data(ttl=300, show_spinner="Loading saved estimates…")
+def _load_saved_estimate_list(_sheet_config: SheetConfig) -> list[dict]:
+    """Fetch the list of previously exported estimate tabs (cached)."""
+    service = SheetsService(_sheet_config)
+    return service.list_saved_estimates()
+
+
 # ---------------------------------------------------------------------------
 # Session state helpers
 # ---------------------------------------------------------------------------
@@ -128,6 +135,14 @@ def _on_reset_cart() -> None:
     st.toast("🗑️ Cart cleared!")
 
 
+def _request_load_estimate() -> None:
+    """Callback: stash the selected tab title so main() can handle it
+    before widgets render (avoids the 'cannot modify after instantiated' error)."""
+    selected = st.session_state.get("load_estimate_select", "")
+    if selected:
+        st.session_state["_pending_import"] = selected
+
+
 # ---------------------------------------------------------------------------
 # Main app
 # ---------------------------------------------------------------------------
@@ -162,6 +177,26 @@ def main() -> None:
     if not line_item_names:
         line_item_names = app_cfg.default_line_items
 
+    # ---- Handle pending import (must run before widgets with matching keys) ----
+    pending_tab = st.session_state.pop("_pending_import", None)
+    if pending_tab:
+        try:
+            service = SheetsService(sheet_cfg)
+            est = service.import_estimate_from_sheet(
+                pending_tab, pricing_guide=pricing_guide
+            )
+            st.session_state["estimate"] = est.model_dump()
+            if est.address:
+                st.session_state["address"] = est.address
+            if est.project_budget:
+                st.session_state["budget"] = est.project_budget
+            if est.access_level:
+                st.session_state["access"] = est.access_level
+            st.toast(f"Loaded: {pending_tab}")
+        except Exception as e:
+            st.error(f"Failed to load estimate: {e}")
+            st.cache_data.clear()
+
     # ---- Sidebar ----
     with st.sidebar:
         st.header("Project Info")
@@ -182,7 +217,7 @@ def main() -> None:
             key="dump_cost",
         )
         labor_rate = st.number_input(
-            "Labor Rate ($/hr)",
+            "Labor Rate ($/hr/person)",
             value=cost_cfg.labor_rate_per_hour,
             step=10.0,
             key="labor_rate",
@@ -205,7 +240,7 @@ def main() -> None:
             tax_rate=cost_cfg.tax_rate,
         )
 
-        # ---- Cart stats + reset ----
+        # ---- Cart stats + actions ----
         st.markdown("---")
         estimate_peek = _get_estimate(line_item_names)
         cart_count = sum(len(li.entries) for li in estimate_peek.line_items)
@@ -217,6 +252,25 @@ def main() -> None:
         c1, c2 = st.columns(2)
         c1.button("🔄 Refresh Prices", on_click=_on_refresh_prices)
         c2.button("🗑️ Reset Cart", type="secondary", on_click=_on_reset_cart)
+
+        # ---- Previous estimates ----
+        saved_estimates = _load_saved_estimate_list(sheet_cfg)
+        if saved_estimates:
+            with st.expander(
+                f"📂 Previous Estimates ({len(saved_estimates)})", expanded=False
+            ):
+                tab_titles = [e["title"] for e in saved_estimates]
+                selected_tab = st.selectbox(
+                    "Select an estimate to load",
+                    options=tab_titles,
+                    key="load_estimate_select",
+                    label_visibility="collapsed",
+                )
+                st.button(
+                    "📥 Load Estimate",
+                    type="primary",
+                    on_click=_request_load_estimate,
+                )
 
     # ---- Get / create estimate & sync sidebar fields ----
     estimate = _get_estimate(line_item_names)

@@ -42,7 +42,7 @@ class CostConfig(BaseSettings):
         description="Cost per dump run in dollars",
     )
     labor_rate_per_hour: float = Field(
-        default=120.0,
+        default=60.0,
         description="Labor rate per hour in dollars",
     )
     crew_size: int = Field(

@@ -269,7 +269,9 @@ class SheetsService:
         # ---- Data rows (row 4+, 0-indexed row 3+) ----
         data_rows = all_rows[3:]
         line_items: list[LineItem] = []
+        sections: list[str] = []
         current_li: LineItem | None = None
+        current_section: str = ""
 
         for row in data_rows:
             while len(row) < 17:
@@ -285,9 +287,23 @@ class SheetsService:
             dump_raw = row[8].strip()       # I – Dump Runs
             labor_raw = row[12].strip()     # M – Labor Hours
 
+            # Detect section header: column A has text, columns C-G are empty
+            if li_name and not any([elem_col, area_raw, area_price_raw, qty_raw, pc_price_raw]):
+                # Check it's not a regular line item (those also have C-G empty
+                # on the first row, but have notes or dump data alongside).
+                # A section header row is standalone — B column is also empty.
+                if not notes_col and not dump_raw:
+                    current_section = li_name
+                    if current_section not in sections:
+                        sections.append(current_section)
+                    continue
+
             # New line-item group when column A has a value
             if li_name:
-                current_li = LineItem(name=li_name)
+                current_li = LineItem(
+                    name=li_name,
+                    section=current_section,
+                )
                 if notes_col:
                     current_li.notes = notes_col
                 if dump_raw:
@@ -301,20 +317,17 @@ class SheetsService:
             if not elem_col:
                 continue
 
-            # Parse "Material Name (notes) — section desc" back into parts
             mat_name, entry_notes, elem_desc = _parse_element_text(elem_col)
 
             if elem_desc and not current_li.element_notes:
                 current_li.element_notes = elem_desc
 
-            # Numeric columns
             area_val = _parse_float(area_raw)
             area_price = _parse_float(area_price_raw)
             qty_val = _parse_float(qty_raw)
             pc_price = _parse_float(pc_price_raw)
             labor_hrs = _parse_float(labor_raw)
 
-            # Resolve unit hint from pricing guide if available
             hint = ""
             mat_category = ""
             if pricing_guide and mat_name:
@@ -336,10 +349,18 @@ class SheetsService:
             )
             current_li.entries.append(entry)
 
+        # Assign orphan line items to a default section
+        if not sections:
+            sections.append("GENERAL")
+        for li in line_items:
+            if not li.section:
+                li.section = sections[0]
+
         return ProjectEstimate(
             address=address,
             project_budget=budget,
             access_level=access_level,
+            sections=sections,
             line_items=line_items,
         )
 
@@ -405,30 +426,13 @@ class SheetsService:
             new_sheet_name=tab_title,
         )
 
-        # ---- Read column A to map line-item names → row numbers ----
-        col_a_values = new_ws.col_values(1)  # 1-indexed list of strings
-        line_item_row_map: dict[str, int] = {}
-        for row_idx, cell_val in enumerate(col_a_values, start=1):
-            name = cell_val.strip()
-            # Skip header rows (1–3); only map data rows
-            if name and row_idx > 3:
-                line_item_row_map[name.lower()] = row_idx
-
-        # ---- Build batch of cell updates ----
+        # ---- Build all output rows sequentially (header info + data) ----
         updates: list[dict[str, Any]] = []
 
         # Project info in the header area (row 2)
-        # Based on template layout: B1="Project Estimate", C1="Project Budget"
-        # Values go in row 2 beneath the labels
+        updates.append({"range": "A2", "values": [[estimate.address]]})
         updates.append({"range": "B2", "values": [[estimate.grand_total(cost_config)]]})
         updates.append({"range": "C2", "values": [[estimate.project_budget]]})
-
-        # Address — write next to the "Address" label in A1
-        # Put the actual address value in A2
-        updates.append({"range": "A2", "values": [[estimate.address]]})
-
-        # Access level checkboxes: E2=Easy, G2=Medium, I2=Difficult
-        # (template has checkboxes; we set TRUE/FALSE)
         updates.append({
             "range": "E2",
             "values": [[estimate.access_level == "Easy"]],
@@ -438,35 +442,35 @@ class SheetsService:
             "values": [[estimate.access_level == "Medium"]],
         })
 
-        # ---- Fill in line-item data (one row per material entry) ----
-        # Collect matched line items with their template row numbers
-        matched_items: list[tuple[int, "LineItem"]] = []
+        # ---- Write line-item data starting at row 4 ----
+        # Columns: A=Line Item, B=Notes, C=Element, D=SqFt/LF, E=$/sf,
+        #          F=Qty, G=$/pc, H=Total, I=Dump Runs, J=Dump$, K=DumpTotal,
+        #          L=(spacer), M=Labor Hrs, N=Labor$, O=Element Total,
+        #          P=Mat Total, Q=Labor Total, R=Total Line Item Price,
+        #          S=(spacer), T=Project Estimate
+        r = 4
+        section_header_rows: list[int] = []
+        current_section = ""
+        first_data_row: int | None = None
+
         for li in estimate.line_items:
-            row_num = line_item_row_map.get(li.name.lower())
-            if row_num is not None:
-                matched_items.append((row_num, li))
+            if not (li.entries or li.labor_hours > 0 or li.dump_runs > 0):
+                continue
 
-        # Sort descending so bottom-up inserts don't shift rows above
-        matched_items.sort(key=lambda x: x[0], reverse=True)
+            # Section header row
+            if li.section and li.section != current_section:
+                current_section = li.section
+                updates.append({
+                    "range": f"A{r}",
+                    "values": [[current_section.upper()]],
+                })
+                section_header_rows.append(r)
+                r += 1
 
-        # Insert extra rows for line items with multiple entries
-        for original_row, li in matched_items:
-            extra = len(li.entries) - 1
-            if extra > 0:
-                blank_rows = [[""] * 17 for _ in range(extra)]
-                new_ws.insert_rows(blank_rows, row=original_row + 1)
-
-        # Re-sort ascending and track cumulative offset from inserts
-        matched_items.sort(key=lambda x: x[0])
-        offset = 0
-
-        for original_row, li in matched_items:
-            actual_start = original_row + offset
             entries = li.entries
             num_rows = max(len(entries), 1)
 
             for i in range(num_rows):
-                r = actual_start + i
                 is_first = i == 0
 
                 if entries:
@@ -477,9 +481,7 @@ class SheetsService:
                     if is_first and li.element_notes:
                         elem_text += f" — {li.element_notes}"
 
-                    # Route area vs piece vs lumber to the right columns
                     if entry.length_feet and entry.length_feet > 0:
-                        # Linear: total LF → area columns, board count → qty
                         entry_area = entry.quantity * entry.length_feet
                         entry_area_price = entry.cost_per_unit
                         entry_qty = entry.quantity if entry.quantity > 0 else ""
@@ -503,58 +505,56 @@ class SheetsService:
                     entry_cost = li.price_per_pc or ""
                     entry_total = ""
 
-                # Template columns:
-                #   B = Notes           (first row only)
-                #   C = Element w/ notes (per entry)
-                #   D = Sq Ft / LF / CY (per entry)
-                #   E = $/sf            (per entry)
-                #   F = Quantity         (per entry)
-                #   G = $/pc             (per entry)
-                #   H = Total materials  (per entry)
-                #   I = Dump Runs        (first row only)
-                #   J = $/dump run       (first row only)
-                #   K = Total dump       (first row only)
-                #   L = (spacer)
-                #   M = Labor Hours      (per entry; first row includes section-level)
-                #   N = Total Labor Cost (first row only)
-                #   O = Total element    (first row only)
-                #   P = Total Mat Cost   (first row only)
-                #   Q = Total Labor Cost (first row only)
-
-                # Per-entry labor; fold section-level hours into the first entry
                 entry_labor = entry.labor_hours if entries else 0.0
                 if is_first:
                     entry_labor += li.labor_hours
 
                 row_values = [
-                    li.notes if is_first else "",                        # B
-                    elem_text,                                           # C
-                    entry_area,                                          # D
-                    entry_area_price,                                    # E
-                    entry_qty,                                           # F
-                    entry_cost,                                          # G
-                    entry_total,                                         # H
-                    (li.dump_runs or "") if is_first else "",            # I
-                    li.dump_cost(cost_config) if is_first else "",       # J
-                    li.dump_cost(cost_config) if is_first else "",       # K
-                    "",                                                  # L
+                    li.name if is_first else "",                             # A
+                    li.notes if is_first else "",                             # B
+                    elem_text,                                               # C
+                    entry_area,                                              # D
+                    entry_area_price,                                        # E
+                    entry_qty,                                               # F
+                    entry_cost,                                              # G
+                    entry_total,                                             # H
+                    (li.dump_runs or "") if is_first else "",                # I
+                    li.dump_cost(cost_config) if is_first else "",           # J
+                    li.dump_cost(cost_config) if is_first else "",           # K
+                    "",                                                      # L
                     entry_labor or "",                                        # M
-                    li.labor_cost(cost_config) if is_first else "",      # N
-                    li.total_element_price(cost_config) if is_first else "",  # O
-                    li.materials_total(cost_config) if is_first else "",      # P
-                    li.labor_cost(cost_config) if is_first else "",           # Q
+                    li.labor_cost(cost_config) if is_first else "",          # N
+                    li.total_element_price(cost_config) if is_first else "", # O
+                    li.materials_total(cost_config) if is_first else "",     # P
+                    li.labor_cost(cost_config) if is_first else "",          # Q
+                    li.total_element_price(cost_config) if is_first else "", # R
+                    "",                                                      # S
                 ]
 
+                # Column T: project estimate grand total on the very first data row
+                is_first_data_row = first_data_row is None
+                if is_first_data_row:
+                    first_data_row = r
+                    row_values.append(estimate.grand_total(cost_config))     # T
+                else:
+                    row_values.append("")                                    # T
+
                 updates.append({
-                    "range": f"B{r}:Q{r}",
+                    "range": f"A{r}:T{r}",
                     "values": [row_values],
                 })
-
-            offset += num_rows - 1
+                r += 1
 
         # ---- Apply all updates in one batch call ----
         if updates:
             new_ws.batch_update(updates, value_input_option="USER_ENTERED")
+
+        # ---- Bold-format section header rows ----
+        for hdr_row in section_header_rows:
+            new_ws.format(
+                f"A{hdr_row}:Q{hdr_row}",
+                {"textFormat": {"bold": True}},
+            )
 
         return f"{spreadsheet.url}#gid={new_ws.id}"
 

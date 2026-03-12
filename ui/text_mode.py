@@ -33,6 +33,10 @@ def _merge_into_existing(
         li.name.lower(): li for li in existing.line_items
     }
 
+    default_section = existing.sections[0] if existing.sections else "GENERAL"
+    if default_section not in existing.sections:
+        existing.sections.append(default_section)
+
     for gen_li in generated.line_items:
         key = gen_li.name.lower()
         if key in existing_map:
@@ -43,6 +47,8 @@ def _merge_into_existing(
             if gen_li.sq_ft:
                 target.sq_ft += gen_li.sq_ft
         else:
+            if not gen_li.section:
+                gen_li.section = default_section
             existing.line_items.append(gen_li)
             existing_map[key] = gen_li
 

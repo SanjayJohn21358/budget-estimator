@@ -189,10 +189,16 @@ class LLMService:
         lines.append(f"Site access: {estimate.access_level}")
         lines.append(f"Grand total: ${estimate.grand_total(config):,.2f}")
         lines.append("")
-        lines.append("## Line items (sections) and contents")
+        lines.append("## Sections and line items")
+        current_section = ""
         for li in estimate.line_items:
-            section_name = li.notes.strip() or li.name
-            lines.append(f"### {li.name}" + (f" — {section_name}" if section_name != li.name else ""))
+            if li.section and li.section != current_section:
+                current_section = li.section
+                lines.append(f"\n## {current_section}")
+            li_label = li.name
+            if li.notes:
+                li_label += f" — {li.notes}"
+            lines.append(f"### {li_label}")
             if li.element_notes:
                 lines.append(f"Description: {li.element_notes}")
             total_labor = li.labor_hours + sum(e.labor_hours for e in li.entries)

@@ -29,6 +29,127 @@ def _save(estimate: ProjectEstimate) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Line-item renderer for output cart
+# ---------------------------------------------------------------------------
+
+
+def _render_output_line_item(
+    estimate: ProjectEstimate,
+    li: "LineItem",
+    li_idx: int,
+    config: CostConfig,
+) -> None:
+    """Render one line item in the output cart detail."""
+    from models import LineItem  # noqa: F811 — deferred to avoid circular
+
+    li_total = li.total_element_price(config)
+    subtitle = ""
+    if li.notes:
+        short = li.notes if len(li.notes) <= 80 else li.notes[:77] + "…"
+        subtitle = f" — {short}"
+
+    with st.expander(
+        f"**{li.name}**{subtitle} · "
+        f"{len(li.entries)} item(s) · **${li_total:,.2f}**",
+        expanded=True,
+    ):
+        if li.entries:
+            _col_w = [2.8, 1.0, 0.8, 0.8, 0.8, 1.2, 0.5]
+            h1, h2, h3, h4, h5, h6, h7 = st.columns(_col_w)
+            h1.markdown("**Material**")
+            h2.markdown("**SqFt/LF**")
+            h3.markdown("**$/sf**")
+            h4.markdown("**Qty**")
+            h5.markdown("**$/pc**")
+            h6.markdown("**Total**")
+            h7.markdown("**Del**")
+
+            for e_idx, entry in enumerate(li.entries):
+                e_hint = entry.unit_hint or ""
+                is_area_entry = e_hint in AREA_HINTS or (
+                    entry.area_value > 0 and entry.quantity == 0
+                )
+                has_length = (
+                    entry.length_feet is not None and entry.length_feet > 0
+                )
+
+                c1, c2, c3, c4, c5, c6, c7 = st.columns(_col_w)
+
+                mat_display = entry.material_name
+                if e_hint:
+                    mat_display += f"  `{unit_label(e_hint)}`"
+                c1.write(mat_display)
+
+                if is_area_entry:
+                    updated_area = c2.number_input(
+                        "Area",
+                        min_value=0.0,
+                        value=entry.area_value,
+                        step=1.0,
+                        key=f"out_area_{li_idx}_{e_idx}",
+                        label_visibility="collapsed",
+                    )
+                    if updated_area != entry.area_value:
+                        entry.area_value = updated_area
+                        _save(estimate)
+                elif has_length:
+                    c2.write(
+                        f"{entry.quantity * (entry.length_feet or 0):.1f}"
+                    )
+                else:
+                    c2.write("—")
+
+                if is_area_entry:
+                    c3.write(f"${entry.price_per_area:,.2f}")
+                elif has_length:
+                    c3.write(f"${entry.cost_per_unit:,.2f}")
+                else:
+                    c3.write("—")
+
+                if is_area_entry and not has_length:
+                    c4.write("—")
+                else:
+                    updated_qty = c4.number_input(
+                        "Qty",
+                        min_value=0.0,
+                        value=entry.quantity,
+                        step=1.0,
+                        key=f"out_qty_{li_idx}_{e_idx}",
+                        label_visibility="collapsed",
+                    )
+                    if updated_qty != entry.quantity:
+                        entry.quantity = updated_qty
+                        _save(estimate)
+
+                if not is_area_entry and not has_length:
+                    c5.write(f"${entry.cost_per_unit:,.2f}")
+                else:
+                    c5.write("—")
+
+                c6.write(f"**${entry.total_cost:,.2f}**")
+
+                if c7.button("🗑️", key=f"out_del_{li_idx}_{e_idx}"):
+                    li.entries.pop(e_idx)
+                    _save(estimate)
+                    st.rerun()
+
+        extras: list[str] = []
+        total_labor_hours = li.labor_hours + sum(
+            e.labor_hours for e in li.entries
+        )
+        if total_labor_hours > 0:
+            extras.append(
+                f"Labor: {total_labor_hours}h → ${li.labor_cost(config):,.2f}"
+            )
+        if li.dump_runs > 0:
+            extras.append(
+                f"Dump runs: {li.dump_runs} → ${li.dump_cost(config):,.2f}"
+            )
+        if extras:
+            st.caption(" · ".join(extras))
+
+
+# ---------------------------------------------------------------------------
 # Public render
 # ---------------------------------------------------------------------------
 
@@ -68,116 +189,30 @@ def render_output(
 
     total_items = sum(len(li.entries) for li in estimate.line_items)
     if total_items == 0:
-        st.info("No items in the cart yet. Add items from the **Interactive Menu** or **Text Description** tab.")
+        st.info(
+            "No items in the cart yet. Add items from the "
+            "**Interactive Menu** or **Text Description** tab."
+        )
     else:
-        for li_idx, li in enumerate(estimate.line_items):
-            if not li.entries and li.labor_hours == 0 and li.dump_runs == 0:
+        sections_order = estimate.sections or [""]
+        for section_name in sections_order:
+            section_lis = [
+                (i, li)
+                for i, li in enumerate(estimate.line_items)
+                if li.section == section_name
+            ]
+            active_lis = [
+                (i, li) for i, li in section_lis
+                if li.entries or li.labor_hours > 0 or li.dump_runs > 0
+            ]
+            if not active_lis:
                 continue
 
-            section_total = li.total_element_price(config)
-            with st.expander(
-                f"**{li.name}** — {len(li.entries)} item(s) · **${section_total:,.2f}**",
-                expanded=True,
-            ):
-                if li.entries:
-                    _col_w = [2.8, 1.0, 0.8, 0.8, 0.8, 1.2, 0.5]
-                    h1, h2, h3, h4, h5, h6, h7 = st.columns(_col_w)
-                    h1.markdown("**Material**")
-                    h2.markdown("**SqFt/LF**")
-                    h3.markdown("**$/sf**")
-                    h4.markdown("**Qty**")
-                    h5.markdown("**$/pc**")
-                    h6.markdown("**Total**")
-                    h7.markdown("**Del**")
+            if section_name:
+                st.markdown(f"#### {section_name}")
 
-                    for e_idx, entry in enumerate(li.entries):
-                        e_hint = entry.unit_hint or ""
-                        is_area_entry = e_hint in AREA_HINTS or (
-                            entry.area_value > 0 and entry.quantity == 0
-                        )
-                        has_length = (
-                            entry.length_feet is not None and entry.length_feet > 0
-                        )
-
-                        c1, c2, c3, c4, c5, c6, c7 = st.columns(_col_w)
-
-                        mat_display = entry.material_name
-                        if e_hint:
-                            mat_display += f"  `{unit_label(e_hint)}`"
-                        c1.write(mat_display)
-
-                        # -- Sq Ft / LF / CY column --
-                        if is_area_entry:
-                            updated_area = c2.number_input(
-                                "Area",
-                                min_value=0.0,
-                                value=entry.area_value,
-                                step=1.0,
-                                key=f"out_area_{li_idx}_{e_idx}",
-                                label_visibility="collapsed",
-                            )
-                            if updated_area != entry.area_value:
-                                entry.area_value = updated_area
-                                _save(estimate)
-                        elif has_length:
-                            c2.write(
-                                f"{entry.quantity * (entry.length_feet or 0):.1f}"
-                            )
-                        else:
-                            c2.write("—")
-
-                        # -- $/sf column --
-                        if is_area_entry:
-                            c3.write(f"${entry.price_per_area:,.2f}")
-                        elif has_length:
-                            c3.write(f"${entry.cost_per_unit:,.2f}")
-                        else:
-                            c3.write("—")
-
-                        # -- Qty column --
-                        if is_area_entry and not has_length:
-                            c4.write("—")
-                        else:
-                            updated_qty = c4.number_input(
-                                "Qty",
-                                min_value=0.0,
-                                value=entry.quantity,
-                                step=1.0,
-                                key=f"out_qty_{li_idx}_{e_idx}",
-                                label_visibility="collapsed",
-                            )
-                            if updated_qty != entry.quantity:
-                                entry.quantity = updated_qty
-                                _save(estimate)
-
-                        # -- $/pc column --
-                        if not is_area_entry and not has_length:
-                            c5.write(f"${entry.cost_per_unit:,.2f}")
-                        else:
-                            c5.write("—")
-
-                        c6.write(f"**${entry.total_cost:,.2f}**")
-
-                        if c7.button("🗑️", key=f"out_del_{li_idx}_{e_idx}"):
-                            li.entries.pop(e_idx)
-                            _save(estimate)
-                            st.rerun()
-
-                # Show labor / dump if present
-                extras: list[str] = []
-
-                # Total labor hours = section-wide + per-entry
-                total_labor_hours = li.labor_hours + sum(
-                    e.labor_hours for e in li.entries
-                )
-                if total_labor_hours > 0:
-                    extras.append(
-                        f"Labor: {total_labor_hours}h → ${li.labor_cost(config):,.2f}"
-                    )
-                if li.dump_runs > 0:
-                    extras.append(f"Dump runs: {li.dump_runs} → ${li.dump_cost(config):,.2f}")
-                if extras:
-                    st.caption(" · ".join(extras))
+            for li_idx, li in active_lis:
+                _render_output_line_item(estimate, li, li_idx, config)
 
     # ---- Summary table (template format) ----
     st.markdown("---")

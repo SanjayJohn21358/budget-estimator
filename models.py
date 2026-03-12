@@ -169,6 +169,7 @@ class LineItem(BaseModel):
     name: str
     notes: str = ""
     element_notes: str = ""
+    section: str = ""
     entries: list[LineItemEntry] = Field(default_factory=list)
 
     # Area / quantity fields (may be filled directly or aggregated)
@@ -220,6 +221,7 @@ class ProjectEstimate(BaseModel):
     address: str = ""
     project_budget: float = 0.0
     access_level: str = "Easy"
+    sections: list[str] = Field(default_factory=list)
     line_items: list[LineItem] = Field(default_factory=list)
 
     def total_materials_cost(self, config: CostConfig) -> float:

@@ -8,10 +8,16 @@ from datetime import datetime
 import pandas as pd
 import streamlit as st
 from reportlab.lib import colors
-from reportlab.lib.pagesizes import landscape, letter
+from reportlab.lib.pagesizes import letter
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import inch
-from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+from reportlab.platypus import (
+    KeepTogether,
+    Paragraph,
+    SimpleDocTemplate,
+    Table,
+    TableStyle,
+)
 
 from config import CostConfig, LLMConfig, SheetConfig
 from models import AREA_HINTS, ProjectEstimate, unit_label
@@ -294,8 +300,34 @@ def render_output(
         mime="text/csv",
     )
 
-    # PDF
-    pdf_bytes = _generate_pdf(estimate, config)
+    # PDF — generate condensed descriptions (LLM if available, else fallback)
+    pdf_desc_key = "pdf_descriptions"
+    if pdf_desc_key not in st.session_state:
+        st.session_state[pdf_desc_key] = {}
+
+    if exp2.button("✨ Generate & Download PDF", type="secondary"):
+        if llm_config and llm_config.openai_api_key:
+            with st.spinner("Generating PDF descriptions…"):
+                try:
+                    llm = LLMService(llm_config)
+                    st.session_state[pdf_desc_key] = (
+                        llm.generate_pdf_line_descriptions(estimate, config)
+                    )
+                except Exception:
+                    st.session_state[pdf_desc_key] = (
+                        _build_fallback_descriptions(estimate, config)
+                    )
+        else:
+            st.session_state[pdf_desc_key] = (
+                _build_fallback_descriptions(estimate, config)
+            )
+        st.rerun()
+
+    pdf_descriptions: dict[str, str] = st.session_state.get(pdf_desc_key, {})
+    if not pdf_descriptions:
+        pdf_descriptions = _build_fallback_descriptions(estimate, config)
+
+    pdf_bytes = _generate_pdf(estimate, config, descriptions=pdf_descriptions)
     exp2.download_button(
         label="⬇️ Download PDF",
         data=pdf_bytes,
@@ -313,71 +345,236 @@ def render_output(
 
 
 # ---------------------------------------------------------------------------
+# PDF description helpers
+# ---------------------------------------------------------------------------
+
+
+def _build_fallback_descriptions(
+    estimate: ProjectEstimate,
+    config: CostConfig,
+) -> dict[str, str]:
+    """Build condensed descriptions by concatenating material names and dimensions.
+
+    Used when no LLM is available.  Produces strings like:
+    "~300sf turf, black steel edging, base materials, seam tape, infill sand"
+    """
+    from models import unit_label as _unit_label  # noqa: F811
+
+    descriptions: dict[str, str] = {}
+    for li in estimate.line_items:
+        if not li.entries and li.labor_hours <= 0 and li.dump_runs <= 0:
+            continue
+        parts: list[str] = []
+        if li.notes:
+            parts.append(li.notes)
+        for e in li.entries:
+            if e.length_feet and e.length_feet > 0:
+                total_len = e.quantity * e.length_feet
+                parts.append(f"~{total_len:.0f}' {e.material_name}")
+            elif e.area_value > 0:
+                u = _unit_label(e.unit_hint) if e.unit_hint else "sf"
+                u_short = u.lower().replace(" ", "")
+                parts.append(f"~{e.area_value:.0f}{u_short} {e.material_name}")
+            elif e.quantity > 0:
+                qty_str = (
+                    f"{int(e.quantity)}" if e.quantity == int(e.quantity)
+                    else f"{e.quantity:.1f}"
+                )
+                parts.append(f"~{qty_str} {e.material_name}")
+            else:
+                parts.append(e.material_name)
+        descriptions[li.name] = ", ".join(parts)
+    return descriptions
+
+
+# ---------------------------------------------------------------------------
 # PDF generation
 # ---------------------------------------------------------------------------
 
 
-def _generate_pdf(estimate: ProjectEstimate, config: CostConfig) -> bytes:
+def _generate_pdf(
+    estimate: ProjectEstimate,
+    config: CostConfig,
+    descriptions: dict[str, str] | None = None,
+) -> bytes:
+    """Generate a clean, client-facing invoice PDF.
+
+    ``descriptions`` maps line-item names to short summary strings.
+    If not provided, entries are omitted from the activity column.
+    """
     buf = io.BytesIO()
     doc = SimpleDocTemplate(
         buf,
-        pagesize=landscape(letter),
-        leftMargin=0.5 * inch,
-        rightMargin=0.5 * inch,
+        pagesize=letter,
+        leftMargin=0.6 * inch,
+        rightMargin=0.6 * inch,
+        topMargin=0.5 * inch,
+        bottomMargin=0.5 * inch,
     )
     styles = getSampleStyleSheet()
     elements: list = []
 
-    title_style = ParagraphStyle(
-        "Title",
-        parent=styles["Heading1"],
-        fontSize=16,
-        spaceAfter=12,
-    )
-    elements.append(Paragraph("Landscaping Project Estimate", title_style))
-    elements.append(Spacer(1, 6))
+    descriptions = descriptions or {}
 
-    info_lines = [
-        f"<b>Address:</b> {estimate.address or 'N/A'}",
-        f"<b>Budget:</b> ${estimate.project_budget:,.2f}",
-        f"<b>Access:</b> {estimate.access_level}",
-        f"<b>Total Estimate:</b> ${estimate.grand_total(config):,.2f}",
+    # -- Styles --
+    header_color = colors.HexColor("#D5EDE1")
+    header_text_color = colors.HexColor("#5A7D6E")
+    border_color = colors.HexColor("#CCCCCC")
+
+    activity_desc_style = ParagraphStyle(
+        "ActivityDesc",
+        parent=styles["Normal"],
+        fontSize=8.5,
+        leading=11,
+        fontName="Helvetica",
+        textColor=colors.HexColor("#444444"),
+    )
+    header_style = ParagraphStyle(
+        "ColHeader",
+        parent=styles["Normal"],
+        fontSize=8,
+        fontName="Helvetica",
+        textColor=header_text_color,
+    )
+    money_style = ParagraphStyle(
+        "Money",
+        parent=styles["Normal"],
+        fontSize=9,
+        fontName="Helvetica",
+        alignment=2,
+    )
+    center_style = ParagraphStyle(
+        "Center",
+        parent=styles["Normal"],
+        fontSize=9,
+        fontName="Helvetica",
+        alignment=1,
+    )
+    total_label_style = ParagraphStyle(
+        "TotalLabel",
+        parent=styles["Normal"],
+        fontSize=12,
+        fontName="Helvetica-Bold",
+        alignment=2,
+    )
+    total_value_style = ParagraphStyle(
+        "TotalValue",
+        parent=styles["Normal"],
+        fontSize=14,
+        fontName="Helvetica-Bold",
+        alignment=2,
+    )
+
+    # Wider AMOUNT column so large totals (e.g. $500,000.10) never wrap.
+    # Usable width: 8.5" - 1.2" margins = 7.3"
+    col_widths = [3.9 * inch, 0.6 * inch, 1.2 * inch, 1.6 * inch]
+
+    # -- Shared helpers to build rows & styles consistently --
+    def _header_row() -> list:
+        return [
+            Paragraph("ACTIVITY", header_style),
+            Paragraph("QTY", header_style),
+            Paragraph("RATE", header_style),
+            Paragraph("AMOUNT", header_style),
+        ]
+
+    def _data_row(li: "LineItem") -> list:
+        li_total = li.total_element_price(config)
+        desc_text = descriptions.get(li.name, "")
+        activity_html = f"<b>{li.name}</b>"
+        if desc_text:
+            activity_html += f"<br/>{desc_text}"
+        return [
+            Paragraph(activity_html, activity_desc_style),
+            Paragraph("1", center_style),
+            Paragraph(f"{li_total:,.2f}", money_style),
+            Paragraph(f"{li_total:,.2f}", money_style),
+        ]
+
+    def _total_row() -> list:
+        grand = estimate.grand_total(config)
+        return [
+            Paragraph("", styles["Normal"]),
+            Paragraph("", styles["Normal"]),
+            Paragraph("TOTAL", total_label_style),
+            Paragraph(f"${grand:,.2f}", total_value_style),
+        ]
+
+    def _base_style_commands(n_data: int) -> list:
+        """Style commands shared by both the main table and the tail table."""
+        cmds: list = [
+            ("BACKGROUND", (0, 0), (-1, 0), header_color),
+            ("TOPPADDING", (0, 0), (-1, 0), 8),
+            ("BOTTOMPADDING", (0, 0), (-1, 0), 8),
+            ("LEFTPADDING", (0, 0), (0, 0), 12),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("LEFTPADDING", (0, 1), (0, -1), 12),
+            ("RIGHTPADDING", (-1, 0), (-1, -1), 12),
+            ("LINEBELOW", (0, 0), (-1, 0), 0.5, border_color),
+        ]
+        for row_idx in range(1, n_data + 1):
+            cmds.append(("TOPPADDING", (0, row_idx), (-1, row_idx), 8))
+            cmds.append(("BOTTOMPADDING", (0, row_idx), (-1, row_idx), 8))
+            cmds.append(
+                ("LINEBELOW", (0, row_idx), (-1, row_idx), 0.25, border_color)
+            )
+        return cmds
+
+    active_items = [
+        li for li in estimate.line_items
+        if li.entries or li.labor_hours > 0 or li.dump_runs > 0
     ]
-    for line in info_lines:
-        elements.append(Paragraph(line, styles["Normal"]))
-    elements.append(Spacer(1, 12))
 
-    df = estimate.to_summary_dataframe(config)
-    header = list(df.columns)
-    table_data = [header]
-    for _, row in df.iterrows():
-        table_data.append([str(v) for v in row.values])
+    if len(active_items) <= 1:
+        # Few enough rows — single table, no split concerns.
+        table_data = [_header_row()]
+        for li in active_items:
+            table_data.append(_data_row(li))
+        table_data.append(_total_row())
 
-    col_count = len(header)
-    col_width = (10 * inch) / col_count if col_count else inch
-    table = Table(table_data, colWidths=[col_width] * col_count)
-    table.setStyle(
-        TableStyle(
-            [
-                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#2E4057")),
-                ("TEXTCOLOR", (0, 0), (-1, 0), colors.whitesmoke),
-                ("FONTSIZE", (0, 0), (-1, -1), 7),
-                ("FONTSIZE", (0, 0), (-1, 0), 8),
-                ("ALIGN", (1, 1), (-1, -1), "RIGHT"),
-                ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
-                (
-                    "ROWBACKGROUNDS",
-                    (0, 1),
-                    (-1, -1),
-                    [colors.white, colors.HexColor("#F0F2F6")],
-                ),
-                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-                ("TOPPADDING", (0, 0), (-1, -1), 3),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
-            ]
+        n = len(active_items)
+        cmds = _base_style_commands(n)
+        cmds.append(
+            ("LINEABOVE", (0, n + 1), (-1, n + 1), 1.0, border_color)
         )
-    )
-    elements.append(table)
+        cmds.append(("TOPPADDING", (0, -1), (-1, -1), 14))
+        cmds.append(("BOTTOMPADDING", (0, -1), (-1, -1), 10))
+
+        table = Table(table_data, colWidths=col_widths, repeatRows=1)
+        table.setStyle(TableStyle(cmds))
+        elements.append(table)
+    else:
+        # Split into main table + tail table (last data row + TOTAL).
+        # KeepTogether on the tail ensures the TOTAL is never orphaned.
+        main_items = active_items[:-1]
+        tail_item = active_items[-1]
+
+        # --- Main table (header + all rows except the last) ---
+        main_data = [_header_row()]
+        for li in main_items:
+            main_data.append(_data_row(li))
+
+        main_cmds = _base_style_commands(len(main_items))
+        main_table = Table(main_data, colWidths=col_widths, repeatRows=1)
+        main_table.setStyle(TableStyle(main_cmds))
+        elements.append(main_table)
+
+        # --- Tail table (last data row + TOTAL), kept together ---
+        tail_data = [_data_row(tail_item), _total_row()]
+        tail_cmds: list = [
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("LEFTPADDING", (0, 0), (0, -1), 12),
+            ("RIGHTPADDING", (-1, 0), (-1, -1), 12),
+            ("TOPPADDING", (0, 0), (-1, 0), 8),
+            ("BOTTOMPADDING", (0, 0), (-1, 0), 8),
+            ("LINEBELOW", (0, 0), (-1, 0), 0.25, border_color),
+            ("LINEABOVE", (0, 1), (-1, 1), 1.0, border_color),
+            ("TOPPADDING", (0, 1), (-1, 1), 14),
+            ("BOTTOMPADDING", (0, 1), (-1, 1), 10),
+        ]
+        tail_table = Table(tail_data, colWidths=col_widths)
+        tail_table.setStyle(TableStyle(tail_cmds))
+        elements.append(KeepTogether([tail_table]))
 
     doc.build(elements)
     return buf.getvalue()

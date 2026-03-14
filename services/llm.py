@@ -290,3 +290,92 @@ class LLMService:
 
         return (response.choices[0].message.content or "").strip()
 
+    # ------------------------------------------------------------------
+    # PDF line-item descriptions (condensed summaries for clean invoice)
+    # ------------------------------------------------------------------
+
+    def generate_pdf_line_descriptions(
+        self,
+        estimate: ProjectEstimate,
+        config: CostConfig,
+    ) -> dict[str, str]:
+        """Generate short, client-facing descriptions for each line item.
+
+        Returns a dict mapping line-item name to a 1-2 line summary suitable
+        for a clean invoice PDF (e.g. "~410sf CT bluestone patio, sand set
+        with basalt rock infill, drainage materials, steel edging").
+        """
+        active_items = [
+            li for li in estimate.line_items
+            if li.entries or li.labor_hours > 0 or li.dump_runs > 0
+        ]
+        if not active_items:
+            return {}
+
+        item_details: list[str] = []
+        for li in active_items:
+            parts = [f"Line item: {li.name}"]
+            if li.notes:
+                parts.append(f"Notes: {li.notes}")
+            if li.element_notes:
+                parts.append(f"Description: {li.element_notes}")
+            for e in li.entries:
+                if e.length_feet and e.length_feet > 0:
+                    u = unit_label(e.unit_hint) if e.unit_hint else "ft"
+                    parts.append(
+                        f"  - {e.material_name}: {e.quantity} pcs x "
+                        f"{e.length_feet} {u}"
+                    )
+                elif e.area_value > 0:
+                    u = unit_label(e.unit_hint) if e.unit_hint else "sq ft"
+                    parts.append(f"  - {e.material_name}: {e.area_value} {u}")
+                else:
+                    parts.append(
+                        f"  - {e.material_name}: qty {e.quantity}"
+                    )
+            total_labor = li.labor_hours + sum(e.labor_hours for e in li.entries)
+            if total_labor > 0:
+                parts.append(f"  Labor: {total_labor}h")
+            if li.dump_runs > 0:
+                parts.append(f"  Dump runs: {li.dump_runs}")
+            item_details.append("\n".join(parts))
+
+        items_block = "\n\n".join(item_details)
+
+        system_content = (
+            "You are writing short descriptions for a landscaping project "
+            "invoice. For each line item, produce a concise 1-2 line summary "
+            "that a client would see on a clean estimate document. "
+            "Include approximate dimensions or quantities where helpful "
+            '(e.g. "~410sf", "~8 LED fixtures", "~6-7 cu yds"). '
+            "List the key materials separated by commas. Do NOT include "
+            "prices, labor hours, or dump runs in the description. "
+            "Keep the tone professional but brief — think invoice line "
+            "item, not paragraph."
+        )
+
+        user_content = (
+            "For each line item below, write a short description. "
+            "Return valid JSON: a single object where each key is the "
+            "exact line item name and the value is the description string.\n\n"
+            f"{items_block}"
+        )
+
+        response = self._client.chat.completions.create(
+            model=self._config.model_name,
+            messages=[
+                {"role": "system", "content": system_content},
+                {"role": "user", "content": user_content},
+            ],
+            temperature=self._config.temperature,
+            response_format={"type": "json_object"},
+        )
+
+        raw = response.choices[0].message.content or "{}"
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            parsed = {}
+
+        return {str(k): str(v) for k, v in parsed.items()}
+

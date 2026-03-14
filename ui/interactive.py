@@ -115,6 +115,29 @@ def render_interactive_mode(
         )
 
         with st.expander(sec_label, expanded=bool(section_lis)):
+            # ---- Delete Section ----
+            with st.popover("🗑️ Delete Section", use_container_width=False):
+                item_word = "line item" if len(section_lis) == 1 else "line items"
+                if section_lis:
+                    st.warning(
+                        f"This will permanently delete **{section_name}** "
+                        f"and its {len(section_lis)} {item_word}."
+                    )
+                else:
+                    st.info(f"Delete empty section **{section_name}**?")
+                if st.button(
+                    "Confirm Delete",
+                    key=f"confirm_del_sec_{sec_idx}",
+                    type="primary",
+                ):
+                    estimate.sections.remove(section_name)
+                    estimate.line_items = [
+                        li for li in estimate.line_items
+                        if li.section != section_name
+                    ]
+                    _save(estimate)
+                    st.rerun()
+
             # ---- Add Line Item (inside section) ----
             with st.expander(
                 "➕ Add Line Item", expanded=not section_lis
@@ -204,8 +227,8 @@ def _render_line_item(
     label = f"**{li.name}**{subtitle} ({items_tag}){badge}"
 
     with st.expander(label, expanded=has_content):
-        # ---- Line item notes & description ----
-        n1, n2 = st.columns(2)
+        # ---- Line item notes, description & delete ----
+        n1, n2, n_del = st.columns([2, 2, 0.4])
         li.notes = n1.text_input(
             "Line Item Notes",
             value=li.notes,
@@ -216,6 +239,26 @@ def _render_line_item(
             value=li.element_notes,
             key=f"li_elem_{li_idx}",
         )
+        n_del.markdown("<br>", unsafe_allow_html=True)
+        if li.entries:
+            with n_del.popover("🗑️"):
+                mat_word = "material" if entry_count == 1 else "materials"
+                st.warning(
+                    f"Delete **{li.name}** and its "
+                    f"{entry_count} {mat_word}?"
+                )
+                if st.button(
+                    "Confirm Delete",
+                    key=f"confirm_del_li_{li_idx}",
+                    type="primary",
+                ):
+                    estimate.line_items.pop(li_idx)
+                    _save(estimate)
+                    st.rerun()
+        elif n_del.button("🗑️", key=f"del_li_{li_idx}", help="Delete this line item"):
+            estimate.line_items.pop(li_idx)
+            _save(estimate)
+            st.rerun()
 
         # ---- Add material to this line item ----
         st.markdown("**Add Material/Unit to this Line Item**")
@@ -278,10 +321,11 @@ def _render_line_item(
             placeholder="e.g. front yard only",
         )
 
-        labor_options = [0.0, 0.5, 1.0, 2.0, 3.0, 4.0, 6.0, 8.0]
-        selected_labor = add_col_labor.selectbox(
+        selected_labor = add_col_labor.number_input(
             "Labor Hours (for this item)",
-            options=labor_options,
+            min_value=0.0,
+            value=0.0,
+            step=0.5,
             key=f"labor_item_{li_idx}",
             help="Labor hours associated with this specific item",
         )

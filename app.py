@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+
 import streamlit as st
 
 from config import AppConfig, CostConfig, LLMConfig, SheetConfig
@@ -135,6 +137,28 @@ def _on_reset_cart() -> None:
     st.toast("🗑️ Cart cleared!")
 
 
+def _export_to_sheets_sidebar(
+    estimate: ProjectEstimate,
+    config: CostConfig,
+    sheet_config: SheetConfig,
+) -> None:
+    """Export estimate to Google Sheets (sidebar variant)."""
+    try:
+        service = SheetsService(sheet_config)
+        tab_title = (
+            f"Estimate - {estimate.address or 'Project'}"
+            f" - {datetime.now():%Y-%m-%d}"
+        )
+        url = service.export_estimate_to_sheet(
+            tab_title=tab_title,
+            estimate=estimate,
+            cost_config=config,
+        )
+        st.success(f"✅ Saved! [Open in Sheets]({url})")
+    except Exception as e:
+        st.error(f"Export failed: {e}")
+
+
 def _request_load_estimate() -> None:
     """Callback: stash the selected tab title so main() can handle it
     before widgets render (avoids the 'cannot modify after instantiated' error)."""
@@ -249,9 +273,20 @@ def main() -> None:
             f"📦 {len(pricing_guide.all_materials)} materials loaded"
         )
 
-        c1, c2 = st.columns(2)
+        c1, c2, c3 = st.columns(3)
         c1.button("🔄 Refresh Prices", on_click=_on_refresh_prices)
-        c2.button("🗑️ Reset Cart", type="secondary", on_click=_on_reset_cart)
+        with c2.popover("🗑️ Reset Cart"):
+            st.warning(
+                f"This will clear all **{cart_count}** item{'s' if cart_count != 1 else ''} "
+                "from your cart. This cannot be undone."
+            )
+            st.button(
+                "Confirm Reset",
+                type="primary",
+                on_click=_on_reset_cart,
+            )
+        if c3.button("📤 Save to Sheets"):
+            _export_to_sheets_sidebar(estimate_peek, cost_cfg, sheet_cfg)
 
         # ---- Previous estimates ----
         saved_estimates = _load_saved_estimate_list(sheet_cfg)

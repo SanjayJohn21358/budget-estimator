@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import streamlit as st
 
@@ -154,6 +154,7 @@ def _export_to_sheets_sidebar(
             estimate=estimate,
             cost_config=config,
         )
+        st.session_state["_last_autosave_ts"] = datetime.now()
         st.success(f"✅ Saved! [Open in Sheets]({url})")
     except Exception as e:
         st.error(f"Export failed: {e}")
@@ -165,6 +166,57 @@ def _request_load_estimate() -> None:
     selected = st.session_state.get("load_estimate_select", "")
     if selected:
         st.session_state["_pending_import"] = selected
+
+
+# ---------------------------------------------------------------------------
+# Auto-save fragment (runs every 2 minutes in the background)
+# ---------------------------------------------------------------------------
+
+_AUTOSAVE_INTERVAL = timedelta(minutes=2)
+
+
+@st.fragment(run_every=_AUTOSAVE_INTERVAL)
+def _autosave_fragment(cost_cfg: CostConfig, sheet_cfg: SheetConfig) -> None:
+    """Auto-save the estimate to Google Sheets every ~2 minutes.
+
+    Uses a timestamp gate so normal page reruns don't trigger redundant saves.
+    """
+    last_ts: datetime | None = st.session_state.get("_last_autosave_ts")
+    if last_ts and (datetime.now() - last_ts) < _AUTOSAVE_INTERVAL - timedelta(seconds=10):
+        st.caption(f"Auto-saved at {last_ts:%I:%M %p}")
+        return
+
+    if "estimate" not in st.session_state:
+        return
+
+    try:
+        estimate = ProjectEstimate.model_validate(st.session_state["estimate"])
+    except Exception:
+        return
+
+    has_data = any(
+        li.entries or li.labor_hours > 0 or li.dump_runs > 0
+        for li in estimate.line_items
+    )
+    if not has_data:
+        return
+
+    try:
+        service = SheetsService(sheet_cfg)
+        tab_title = (
+            f"Estimate - {estimate.address or 'Project'}"
+            f" - {datetime.now():%Y-%m-%d}"
+        )
+        service.export_estimate_to_sheet(
+            tab_title=tab_title,
+            estimate=estimate,
+            cost_config=cost_cfg,
+        )
+        now = datetime.now()
+        st.session_state["_last_autosave_ts"] = now
+        st.caption(f"Auto-saved at {now:%I:%M %p}")
+    except Exception:
+        st.caption("Auto-save failed")
 
 
 # ---------------------------------------------------------------------------
@@ -287,6 +339,8 @@ def main() -> None:
             )
         if c3.button("📤 Save to Sheets"):
             _export_to_sheets_sidebar(estimate_peek, cost_cfg, sheet_cfg)
+
+        _autosave_fragment(cost_cfg, sheet_cfg)
 
         # ---- Previous estimates ----
         saved_estimates = _load_saved_estimate_list(sheet_cfg)

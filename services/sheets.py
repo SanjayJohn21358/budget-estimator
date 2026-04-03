@@ -411,19 +411,19 @@ class SheetsService:
                 f"target spreadsheet. Make sure it exists."
             )
 
-        # ---- Ensure unique tab name ----
+        # ---- Create new tab from template, then swap with any existing ----
         tab_title = tab_title[:100]
-        existing_titles = {ws.title for ws in spreadsheet.worksheets()}
-        if tab_title in existing_titles:
-            suffix = 1
-            while f"{tab_title} ({suffix})" in existing_titles:
-                suffix += 1
-            tab_title = f"{tab_title} ({suffix})"
+        old_ws = None
+        for ws in spreadsheet.worksheets():
+            if ws.title == tab_title:
+                old_ws = ws
+                break
 
-        # ---- Duplicate the template (preserves formatting & formulas) ----
+        # Duplicate into a temp name so both old and new coexist briefly
+        temp_title = f"_tmp_{tab_title}"[:100]
         new_ws = spreadsheet.duplicate_sheet(
             source_sheet_id=template_ws.id,
-            new_sheet_name=tab_title,
+            new_sheet_name=temp_title,
         )
 
         # ---- Build all output rows sequentially (header info + data) ----
@@ -555,6 +555,11 @@ class SheetsService:
                 f"A{hdr_row}:Q{hdr_row}",
                 {"textFormat": {"bold": True}},
             )
+
+        # ---- Safe swap: new tab is fully written → delete old, rename new ----
+        if old_ws is not None:
+            spreadsheet.del_worksheet(old_ws)
+        new_ws.update_title(tab_title)
 
         return f"{spreadsheet.url}#gid={new_ws.id}"
 

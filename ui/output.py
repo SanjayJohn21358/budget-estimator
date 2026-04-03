@@ -590,7 +590,7 @@ def _export_to_sheets(
     config: CostConfig,
     sheet_config: SheetConfig,
 ) -> None:
-    """Duplicate the template tab and fill in estimate data."""
+    """Overwrite the existing estimate tab (or create one) with current data."""
     try:
         service = SheetsService(sheet_config)
         tab_title = (
@@ -602,6 +602,7 @@ def _export_to_sheets(
             estimate=estimate,
             cost_config=config,
         )
+        st.session_state["_last_autosave_ts"] = datetime.now()
         st.success(f"✅ Exported! [Open in Google Sheets]({url})")
     except Exception as e:
         st.error(f"Export failed: {e}")

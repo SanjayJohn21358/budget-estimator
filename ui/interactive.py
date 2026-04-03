@@ -38,6 +38,27 @@ def _ensure_sections(estimate: ProjectEstimate) -> None:
         _save(estimate)
 
 
+_DEFAULT_SECTION_COLOR = "#2E7D5F"
+
+
+def _section_header_html(name: str, color: str, summary: str) -> str:
+    """Build an HTML banner for a section header."""
+    return (
+        f'<div style="'
+        f"background:{color};"
+        f"color:#fff;"
+        f"padding:10px 16px;"
+        f"border-radius:8px 8px 0 0;"
+        f"margin-top:0.75rem;"
+        f'">'
+        f'<strong style="font-size:1.15em;">\U0001F4C1 {name}</strong>'
+        f'<span style="margin-left:0.75em;opacity:0.92;font-size:0.92em;">'
+        f"{summary}"
+        f"</span>"
+        f"</div>"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Public render function
 # ---------------------------------------------------------------------------
@@ -107,17 +128,41 @@ def render_interactive_mode(
         )
         section_mat_count = sum(len(li.entries) for _, li in section_lis)
 
-        sec_label = (
-            f"**{section_name}** · "
-            f"{len(section_lis)} line item{'s' if len(section_lis) != 1 else ''}"
-            f" · {section_mat_count} material{'s' if section_mat_count != 1 else ''}"
-            f" — **${section_total:,.2f}**"
+        sec_color = estimate.section_colors.get(
+            section_name, _DEFAULT_SECTION_COLOR
         )
 
-        with st.expander(sec_label, expanded=bool(section_lis)):
-            # ---- Delete Section ----
-            with st.popover("🗑️ Delete Section", use_container_width=False):
-                item_word = "line item" if len(section_lis) == 1 else "line items"
+        summary = (
+            f"{len(section_lis)} line item"
+            f"{'s' if len(section_lis) != 1 else ''}"
+            f" · {section_mat_count} material"
+            f"{'s' if section_mat_count != 1 else ''}"
+            f" — ${section_total:,.2f}"
+        )
+        st.markdown(
+            _section_header_html(section_name, sec_color, summary),
+            unsafe_allow_html=True,
+        )
+
+        with st.expander("Section details", expanded=bool(section_lis)):
+            # ---- Section controls: color picker + delete ----
+            ctrl_color, ctrl_del, _ = st.columns([1, 1, 3])
+            new_color = ctrl_color.color_picker(
+                "Section color",
+                value=sec_color,
+                key=f"sec_color_{sec_idx}",
+            )
+            if new_color != sec_color:
+                estimate.section_colors[section_name] = new_color
+                _save(estimate)
+                st.rerun()
+
+            with ctrl_del.popover(
+                "🗑️ Delete Section", use_container_width=False
+            ):
+                item_word = (
+                    "line item" if len(section_lis) == 1 else "line items"
+                )
                 if section_lis:
                     st.warning(
                         f"This will permanently delete **{section_name}** "
@@ -132,9 +177,11 @@ def render_interactive_mode(
                 ):
                     estimate.sections.remove(section_name)
                     estimate.line_items = [
-                        li for li in estimate.line_items
+                        li
+                        for li in estimate.line_items
                         if li.section != section_name
                     ]
+                    estimate.section_colors.pop(section_name, None)
                     _save(estimate)
                     st.rerun()
 

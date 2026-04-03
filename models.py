@@ -222,6 +222,7 @@ class ProjectEstimate(BaseModel):
     project_budget: float = 0.0
     access_level: str = "Easy"
     sections: list[str] = Field(default_factory=list)
+    section_colors: dict[str, str] = Field(default_factory=dict)
     line_items: list[LineItem] = Field(default_factory=list)
 
     def total_materials_cost(self, config: CostConfig) -> float:

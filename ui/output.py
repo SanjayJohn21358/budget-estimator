@@ -24,6 +24,8 @@ from models import AREA_HINTS, ProjectEstimate, unit_label
 from services.llm import LLMService
 from services.sheets import SheetsService
 
+_DEFAULT_SECTION_COLOR = "#2E7D5F"
+
 
 # ---------------------------------------------------------------------------
 # Session-state helper
@@ -215,7 +217,30 @@ def render_output(
                 continue
 
             if section_name:
-                st.markdown(f"#### {section_name}")
+                sec_color = estimate.section_colors.get(
+                    section_name, _DEFAULT_SECTION_COLOR
+                )
+                sec_total = sum(
+                    li.total_element_price(config) for _, li in active_lis
+                )
+                st.markdown(
+                    f'<div style="'
+                    f"background:{sec_color};"
+                    f"color:#fff;"
+                    f"padding:10px 16px;"
+                    f"border-radius:8px;"
+                    f"margin:0.75rem 0 0.5rem 0;"
+                    f'">'
+                    f'<strong style="font-size:1.1em;">'
+                    f"\U0001F4C1 {section_name}</strong>"
+                    f'<span style="margin-left:0.75em;opacity:0.92;'
+                    f'font-size:0.92em;">'
+                    f"{len(active_lis)} line item"
+                    f"{'s' if len(active_lis) != 1 else ''}"
+                    f" — ${sec_total:,.2f}"
+                    f"</span></div>",
+                    unsafe_allow_html=True,
+                )
 
             for li_idx, li in active_lis:
                 _render_output_line_item(estimate, li, li_idx, config)

@@ -330,7 +330,8 @@ def _render_line_item(
             help="Labor hours associated with this specific item",
         )
 
-        # Unit price
+        # Unit price — key includes material name so switching materials
+        # within the same category resets the widget to the new default.
         chosen_unit_price: float | None = None
         lock_price = False
         if selected_mat is not None:
@@ -348,12 +349,19 @@ def _render_line_item(
             else:
                 default_price = sheet_price
 
+            price_key = f"price_input_{li_idx}_{selected_mat.name}"
+            prev_price_mat = st.session_state.get(f"_price_mat_{li_idx}")
+            if prev_price_mat and prev_price_mat != selected_mat.name:
+                old_key = f"price_input_{li_idx}_{prev_price_mat}"
+                st.session_state.pop(old_key, None)
+            st.session_state[f"_price_mat_{li_idx}"] = selected_mat.name
+
             chosen_unit_price = st.number_input(
                 "Unit Price",
                 min_value=0.0,
                 value=default_price,
                 step=0.5,
-                key=f"price_input_{li_idx}",
+                key=price_key,
                 help="Custom unit price for this material.",
             )
 

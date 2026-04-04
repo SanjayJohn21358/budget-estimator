@@ -242,9 +242,9 @@ class SheetsService:
         ws = spreadsheet.worksheet(tab_title)
         all_rows: list[list[str]] = ws.get_all_values()
 
-        if len(all_rows) < 4:
+        if len(all_rows) < 2:
             raise ValueError(
-                f"Tab '{tab_title}' has fewer than 4 rows — "
+                f"Tab '{tab_title}' has fewer than 2 rows — "
                 "it doesn't look like an exported estimate."
             )
 
@@ -413,153 +413,167 @@ class SheetsService:
 
         # ---- Create new tab from template, then swap with any existing ----
         tab_title = tab_title[:100]
+        temp_title = f"_tmp_{tab_title}"[:100]
         old_ws = None
+        stale_tmp_ws = None
         for ws in spreadsheet.worksheets():
             if ws.title == tab_title:
                 old_ws = ws
-                break
+            elif ws.title == temp_title:
+                stale_tmp_ws = ws
 
-        # Duplicate into a temp name so both old and new coexist briefly
-        temp_title = f"_tmp_{tab_title}"[:100]
+        # Remove leftover temp sheet from a previous failed export
+        if stale_tmp_ws is not None:
+            spreadsheet.del_worksheet(stale_tmp_ws)
+
         new_ws = spreadsheet.duplicate_sheet(
             source_sheet_id=template_ws.id,
             new_sheet_name=temp_title,
         )
 
         # ---- Build all output rows sequentially (header info + data) ----
-        updates: list[dict[str, Any]] = []
+        try:
+            updates: list[dict[str, Any]] = []
 
-        # Project info in the header area (row 2)
-        updates.append({"range": "A2", "values": [[estimate.address]]})
-        updates.append({"range": "B2", "values": [[estimate.grand_total(cost_config)]]})
-        updates.append({"range": "C2", "values": [[estimate.project_budget]]})
-        updates.append({
-            "range": "E2",
-            "values": [[estimate.access_level == "Easy"]],
-        })
-        updates.append({
-            "range": "G2",
-            "values": [[estimate.access_level == "Medium"]],
-        })
+            # Project info in the header area (row 2)
+            updates.append({"range": "A2", "values": [[estimate.address]]})
+            updates.append({"range": "B2", "values": [[estimate.grand_total(cost_config)]]})
+            updates.append({"range": "C2", "values": [[estimate.project_budget]]})
+            updates.append({
+                "range": "E2",
+                "values": [[estimate.access_level == "Easy"]],
+            })
+            updates.append({
+                "range": "G2",
+                "values": [[estimate.access_level == "Medium"]],
+            })
 
-        # ---- Write line-item data starting at row 4 ----
-        # Columns: A=Line Item, B=Notes, C=Element, D=SqFt/LF, E=$/sf,
-        #          F=Qty, G=$/pc, H=Total, I=Dump Runs, J=Dump$, K=DumpTotal,
-        #          L=(spacer), M=Labor Hrs, N=Labor$, O=Element Total,
-        #          P=Mat Total, Q=Labor Total, R=Total Line Item Price,
-        #          S=(spacer), T=Project Estimate
-        r = 4
-        section_header_rows: list[int] = []
-        current_section = ""
-        first_data_row: int | None = None
+            # ---- Write line-item data starting at row 4 ----
+            # Columns: A=Line Item, B=Notes, C=Element, D=SqFt/LF, E=$/sf,
+            #          F=Qty, G=$/pc, H=Total, I=Dump Runs, J=Dump$, K=DumpTotal,
+            #          L=(spacer), M=Labor Hrs, N=Labor$, O=Element Total,
+            #          P=Mat Total, Q=Labor Total, R=Total Line Item Price,
+            #          S=(spacer), T=Project Estimate
+            r = 4
+            section_header_rows: list[int] = []
+            current_section = ""
+            first_data_row: int | None = None
 
-        for li in estimate.line_items:
-            if not (li.entries or li.labor_hours > 0 or li.dump_runs > 0):
-                continue
+            for li in estimate.line_items:
+                if not (li.entries or li.labor_hours > 0 or li.dump_runs > 0):
+                    continue
 
-            # Section header row
-            if li.section and li.section != current_section:
-                current_section = li.section
-                updates.append({
-                    "range": f"A{r}",
-                    "values": [[current_section.upper()]],
-                })
-                section_header_rows.append(r)
-                r += 1
+                # Section header row
+                if li.section and li.section != current_section:
+                    current_section = li.section
+                    updates.append({
+                        "range": f"A{r}",
+                        "values": [[current_section.upper()]],
+                    })
+                    section_header_rows.append(r)
+                    r += 1
 
-            entries = li.entries
-            num_rows = max(len(entries), 1)
+                entries = li.entries
+                num_rows = max(len(entries), 1)
 
-            for i in range(num_rows):
-                is_first = i == 0
+                for i in range(num_rows):
+                    is_first = i == 0
 
-                if entries:
-                    entry = entries[i]
-                    elem_text = entry.material_name
-                    if entry.notes:
-                        elem_text += f" ({entry.notes})"
-                    if is_first and li.element_notes:
-                        elem_text += f" — {li.element_notes}"
+                    if entries:
+                        entry = entries[i]
+                        elem_text = entry.material_name
+                        if entry.notes:
+                            elem_text += f" ({entry.notes})"
+                        if is_first and li.element_notes:
+                            elem_text += f" — {li.element_notes}"
 
-                    if entry.length_feet and entry.length_feet > 0:
-                        entry_area = entry.quantity * entry.length_feet
-                        entry_area_price = entry.cost_per_unit
-                        entry_qty = entry.quantity if entry.quantity > 0 else ""
-                        entry_cost = ""
-                    elif entry.area_value > 0:
-                        entry_area = entry.area_value
-                        entry_area_price = entry.price_per_area
-                        entry_qty = entry.quantity if entry.quantity > 0 else ""
-                        entry_cost = entry.cost_per_unit if entry.cost_per_unit > 0 else ""
+                        if entry.length_feet and entry.length_feet > 0:
+                            entry_area = entry.quantity * entry.length_feet
+                            entry_area_price = entry.cost_per_unit
+                            entry_qty = entry.quantity if entry.quantity > 0 else ""
+                            entry_cost = ""
+                        elif entry.area_value > 0:
+                            entry_area = entry.area_value
+                            entry_area_price = entry.price_per_area
+                            entry_qty = entry.quantity if entry.quantity > 0 else ""
+                            entry_cost = entry.cost_per_unit if entry.cost_per_unit > 0 else ""
+                        else:
+                            entry_area = ""
+                            entry_area_price = ""
+                            entry_qty = entry.quantity or ""
+                            entry_cost = entry.cost_per_unit or ""
+                        entry_total = entry.total_cost or ""
                     else:
-                        entry_area = ""
-                        entry_area_price = ""
-                        entry_qty = entry.quantity or ""
-                        entry_cost = entry.cost_per_unit or ""
-                    entry_total = entry.total_cost or ""
-                else:
-                    elem_text = li.element_notes or ""
-                    entry_area = li.sq_ft or ""
-                    entry_area_price = li.price_per_sf or ""
-                    entry_qty = li.quantity or ""
-                    entry_cost = li.price_per_pc or ""
-                    entry_total = ""
+                        elem_text = li.element_notes or ""
+                        entry_area = li.sq_ft or ""
+                        entry_area_price = li.price_per_sf or ""
+                        entry_qty = li.quantity or ""
+                        entry_cost = li.price_per_pc or ""
+                        entry_total = ""
 
-                entry_labor = entry.labor_hours if entries else 0.0
-                if is_first:
-                    entry_labor += li.labor_hours
+                    entry_labor = entry.labor_hours if entries else 0.0
+                    if is_first:
+                        entry_labor += li.labor_hours
 
-                row_values = [
-                    li.name if is_first else "",                             # A
-                    li.notes if is_first else "",                             # B
-                    elem_text,                                               # C
-                    entry_area,                                              # D
-                    entry_area_price,                                        # E
-                    entry_qty,                                               # F
-                    entry_cost,                                              # G
-                    entry_total,                                             # H
-                    (li.dump_runs or "") if is_first else "",                # I
-                    li.dump_cost(cost_config) if is_first else "",           # J
-                    li.dump_cost(cost_config) if is_first else "",           # K
-                    "",                                                      # L
-                    entry_labor or "",                                        # M
-                    li.labor_cost(cost_config) if is_first else "",          # N
-                    li.total_element_price(cost_config) if is_first else "", # O
-                    li.materials_total(cost_config) if is_first else "",     # P
-                    li.labor_cost(cost_config) if is_first else "",          # Q
-                    li.total_element_price(cost_config) if is_first else "", # R
-                    "",                                                      # S
-                ]
+                    row_values = [
+                        li.name if is_first else "",                             # A
+                        li.notes if is_first else "",                             # B
+                        elem_text,                                               # C
+                        entry_area,                                              # D
+                        entry_area_price,                                        # E
+                        entry_qty,                                               # F
+                        entry_cost,                                              # G
+                        entry_total,                                             # H
+                        (li.dump_runs or "") if is_first else "",                # I
+                        li.dump_cost(cost_config) if is_first else "",           # J
+                        li.dump_cost(cost_config) if is_first else "",           # K
+                        "",                                                      # L
+                        entry_labor or "",                                        # M
+                        li.labor_cost(cost_config) if is_first else "",          # N
+                        li.total_element_price(cost_config) if is_first else "", # O
+                        li.materials_total(cost_config) if is_first else "",     # P
+                        li.labor_cost(cost_config) if is_first else "",          # Q
+                        li.total_element_price(cost_config) if is_first else "", # R
+                        "",                                                      # S
+                    ]
 
-                # Column T: project estimate grand total on the very first data row
-                is_first_data_row = first_data_row is None
-                if is_first_data_row:
-                    first_data_row = r
-                    row_values.append(estimate.grand_total(cost_config))     # T
-                else:
-                    row_values.append("")                                    # T
+                    # Column T: project estimate grand total on the very first data row
+                    is_first_data_row = first_data_row is None
+                    if is_first_data_row:
+                        first_data_row = r
+                        row_values.append(estimate.grand_total(cost_config))     # T
+                    else:
+                        row_values.append("")                                    # T
 
-                updates.append({
-                    "range": f"A{r}:T{r}",
-                    "values": [row_values],
-                })
-                r += 1
+                    updates.append({
+                        "range": f"A{r}:T{r}",
+                        "values": [row_values],
+                    })
+                    r += 1
 
-        # ---- Apply all updates in one batch call ----
-        if updates:
-            new_ws.batch_update(updates, value_input_option="USER_ENTERED")
+            # ---- Apply all updates in one batch call ----
+            if updates:
+                new_ws.batch_update(updates, value_input_option="USER_ENTERED")
 
-        # ---- Bold-format section header rows ----
-        for hdr_row in section_header_rows:
-            new_ws.format(
-                f"A{hdr_row}:Q{hdr_row}",
-                {"textFormat": {"bold": True}},
-            )
+            # ---- Bold-format section header rows ----
+            for hdr_row in section_header_rows:
+                new_ws.format(
+                    f"A{hdr_row}:Q{hdr_row}",
+                    {"textFormat": {"bold": True}},
+                )
 
-        # ---- Safe swap: new tab is fully written → delete old, rename new ----
-        if old_ws is not None:
-            spreadsheet.del_worksheet(old_ws)
-        new_ws.update_title(tab_title)
+            # ---- Safe swap: new tab is fully written → delete old, rename new ----
+            if old_ws is not None:
+                spreadsheet.del_worksheet(old_ws)
+            new_ws.update_title(tab_title)
+
+        except Exception:
+            # Don't leave an orphaned _tmp_ sheet that blocks future saves
+            try:
+                spreadsheet.del_worksheet(new_ws)
+            except Exception:
+                pass
+            raise
 
         return f"{spreadsheet.url}#gid={new_ws.id}"
 

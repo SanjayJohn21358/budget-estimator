@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from uuid import uuid4
 from typing import Optional
 
 import pandas as pd
@@ -129,6 +130,8 @@ def unit_label(hint: str) -> str:
 class LineItemEntry(BaseModel):
     """A single material selection within a line item."""
 
+    # Persistent UI identifier so Streamlit widget keys stay stable after deletes.
+    ui_key: str = Field(default_factory=lambda: uuid4().hex)
     material_name: str = ""
     category: str = ""
 
@@ -282,8 +285,9 @@ class ProjectEstimate(BaseModel):
                 # Per-entry column routing: area vs piece vs lumber
                 if entry is not None:
                     if entry.length_feet and entry.length_feet > 0:
-                        # Linear: total LF → area column, board count → qty
-                        entry_area = entry.quantity * entry.length_feet
+                        # Linear: show per-piece length in summary (not qty-multiplied total).
+                        # Cost math still uses quantity × length in LineItemEntry.total_cost.
+                        entry_area = entry.length_feet
                         entry_area_price = entry.cost_per_unit
                         entry_qty = entry.quantity if entry.quantity > 0 else None
                         entry_pc_price = None

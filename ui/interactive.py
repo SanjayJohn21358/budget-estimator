@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import streamlit as st
+try:
+    from streamlit_sortables import sort_items as _sortable_items
+except ModuleNotFoundError:
+    _sortable_items = None
 
 from config import CostConfig
 from models import (
@@ -39,6 +43,20 @@ def _ensure_sections(estimate: ProjectEstimate) -> None:
 
 
 _DEFAULT_SECTION_COLOR = "#2E7D5F"
+_SORTABLES_WARNING_KEY = "_sortables_missing_warned"
+
+
+def _sort_items(items: list[str], key: str) -> list[str]:
+    """Sort using drag-drop widget when available; otherwise keep order."""
+    if _sortable_items is None:
+        if not st.session_state.get(_SORTABLES_WARNING_KEY):
+            st.info(
+                "Drag-to-reorder is unavailable because `streamlit-sortables` "
+                "is not installed in this environment."
+            )
+            st.session_state[_SORTABLES_WARNING_KEY] = True
+        return items
+    return _sortable_items(items, key=key)
 
 
 def _section_header_html(name: str, color: str, summary: str) -> str:
@@ -213,14 +231,29 @@ def render_interactive_mode(
                     key=f"create_li_{sec_idx}",
                 ):
                     base = li_type.strip() or "Line Item"
-                    estimate.line_items.append(
-                        LineItem(
-                            name=base,
-                            notes=li_notes.strip(),
-                            element_notes=li_desc.strip(),
-                            section=section_name,
-                        )
+                    new_item = LineItem(
+                        name=base,
+                        notes=li_notes.strip(),
+                        element_notes=li_desc.strip(),
+                        section=section_name,
                     )
+                    # Keep line items grouped by section order so exports don't
+                    # emit duplicate section headers when revisiting a section.
+                    sec_order = {name: idx for idx, name in enumerate(estimate.sections)}
+                    target_order = sec_order.get(section_name, len(sec_order))
+                    insert_at = len(estimate.line_items)
+                    for idx, existing in enumerate(estimate.line_items):
+                        existing_order = sec_order.get(existing.section, len(sec_order))
+                        if existing_order > target_order:
+                            insert_at = idx
+                            break
+                    estimate.line_items.insert(insert_at, new_item)
+                    # Reset add-line-item inputs after successful add.
+                    st.session_state[f"li_type_{sec_idx}"] = (
+                        base_li_types[0] if base_li_types else base
+                    )
+                    st.session_state[f"li_notes_new_{sec_idx}"] = ""
+                    st.session_state[f"li_desc_new_{sec_idx}"] = ""
                     _save(estimate)
                     st.rerun()
 
@@ -478,6 +511,20 @@ def _render_line_item(
                         use_dynamic_pricing=not lock_price,
                     )
                 li.entries.append(entry)
+                # Reset add-material inputs after successful add.
+                st.session_state[f"cat_{li_idx}"] = "All Categories"
+                st.session_state[f"mat_{li_idx}"] = "— Select a material —"
+                st.session_state[f"add_qty_{li_idx}"] = 1.0
+                st.session_state[f"notes_{li_idx}"] = ""
+                st.session_state[f"labor_item_{li_idx}"] = 0.0
+                st.session_state[f"add_length_ft_{li_idx}"] = 8.0
+                prev_mat_name = st.session_state.pop(
+                    f"_price_mat_{li_idx}", None
+                )
+                if prev_mat_name:
+                    st.session_state.pop(
+                        f"price_input_{li_idx}_{prev_mat_name}", None
+                    )
                 _save(estimate)
                 st.rerun()
             else:
@@ -485,6 +532,28 @@ def _render_line_item(
 
         # ---- Material entries table ----
         if li.entries:
+            if len(li.entries) > 1:
+                st.caption("Drag to reorder materials")
+                sortable_labels = [
+                    (
+                        f"{entry.material_name} • ${entry.total_cost:,.2f} "
+                        f"• #{entry.ui_key[:6]}"
+                    )
+                    for entry in li.entries
+                ]
+                sorted_labels = _sort_items(
+                    sortable_labels,
+                    key=f"cart_sort_{li_idx}",
+                )
+                if sorted_labels != sortable_labels:
+                    entry_by_label = {
+                        label: entry
+                        for label, entry in zip(sortable_labels, li.entries)
+                    }
+                    li.entries = [entry_by_label[label] for label in sorted_labels]
+                    _save(estimate)
+                    st.rerun()
+
             _col_w = [2.6, 0.9, 0.8, 0.8, 0.8, 1.1, 0.8, 1.4, 0.5]
             (hdr1, hdr2, hdr3, hdr4, hdr5,
              hdr6, hdr7, hdr8, hdr9) = st.columns(_col_w)
@@ -499,6 +568,7 @@ def _render_line_item(
             hdr9.markdown("**Del**")
 
             for e_idx, entry in enumerate(li.entries):
+                entry_key = entry.ui_key
                 e_hint = entry.unit_hint or ""
                 is_area_entry = e_hint in AREA_HINTS or (
                     entry.area_value > 0 and entry.quantity == 0
@@ -522,12 +592,13 @@ def _render_line_item(
                         min_value=0.0,
                         value=entry.area_value,
                         step=1.0,
-                        key=f"cart_area_{li_idx}_{e_idx}",
+                        key=f"cart_area_{li_idx}_{entry_key}",
                         label_visibility="collapsed",
                     )
                     if updated_area != entry.area_value:
                         entry.area_value = updated_area
                         _save(estimate)
+                        st.rerun()
                 elif has_length:
                     c2.write(
                         f"{entry.quantity * (entry.length_feet or 0):.1f}"
@@ -552,12 +623,13 @@ def _render_line_item(
                         min_value=0.0,
                         value=entry.quantity,
                         step=1.0,
-                        key=f"cart_qty_{li_idx}_{e_idx}",
+                        key=f"cart_qty_{li_idx}_{entry_key}",
                         label_visibility="collapsed",
                     )
                     if updated_qty != entry.quantity:
                         entry.quantity = updated_qty
                         _save(estimate)
+                        st.rerun()
 
                 # -- $/pc column --
                 if not is_area_entry and not has_length:
@@ -572,16 +644,17 @@ def _render_line_item(
                     min_value=0.0,
                     value=entry.labor_hours,
                     step=0.5,
-                    key=f"cart_labor_{li_idx}_{e_idx}",
+                    key=f"cart_labor_{li_idx}_{entry_key}",
                     label_visibility="collapsed",
                 )
                 if updated_labor != entry.labor_hours:
                     entry.labor_hours = updated_labor
                     _save(estimate)
+                    st.rerun()
 
                 c8.write(entry.notes or "—")
 
-                if c9.button("🗑️", key=f"del_{li_idx}_{e_idx}"):
+                if c9.button("🗑️", key=f"del_{li_idx}_{entry_key}"):
                     li.entries.pop(e_idx)
                     _save(estimate)
                     st.rerun()
@@ -691,7 +764,7 @@ def _render_line_item(
         # ---- Labor & dump runs ----
         st.markdown("**Labor & Dump Runs**")
         d1, d2, d3 = st.columns(3)
-        li.dump_runs = int(
+        updated_dump_runs = int(
             d1.number_input(
                 "Dump Runs",
                 min_value=0,
@@ -700,6 +773,10 @@ def _render_line_item(
                 key=f"dump_{li_idx}",
             )
         )
+        if updated_dump_runs != li.dump_runs:
+            li.dump_runs = updated_dump_runs
+            _save(estimate)
+            st.rerun()
         d2.write(f"Dump cost: **${li.dump_cost(config):,.2f}**")
         total_hrs = li.labor_hours + sum(e.labor_hours for e in li.entries)
         d3.write(

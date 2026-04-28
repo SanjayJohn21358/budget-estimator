@@ -7,4 +7,5 @@ pydantic>=2.8.0
 pydantic-settings>=2.4.0
 pandas>=2.2.0
 reportlab>=4.2.0
+streamlit-sortables>=0.3.1
 

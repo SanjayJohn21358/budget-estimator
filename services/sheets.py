@@ -192,8 +192,7 @@ class SheetsService:
 
         Only tabs whose title starts with ``"Estimate - "`` are included
         (matching the naming convention used by ``export_estimate_to_sheet``).
-        Results are sorted most-recent-first (reverse alphabetical, since
-        titles end with a date).
+        Results are sorted most-recent-first using worksheet gid descending.
         """
         target_id = (
             self._config.estimates_sheet_id
@@ -210,7 +209,7 @@ class SheetsService:
             if ws.title.startswith(self._ESTIMATE_TAB_PREFIX):
                 results.append({"title": ws.title, "gid": ws.id})
 
-        results.sort(key=lambda d: d["title"], reverse=True)
+        results.sort(key=lambda d: int(d["gid"]), reverse=True)
         return results
 
     def import_estimate_from_sheet(
@@ -313,20 +312,31 @@ class SheetsService:
             if current_li is None:
                 continue
 
-            # Skip rows with no element data
+            area_val = _parse_float(area_raw)
+            area_price = _parse_float(area_price_raw)
+            qty_val = _parse_float(qty_raw)
+            pc_price = _parse_float(pc_price_raw)
+            labor_hrs = _parse_float(labor_raw)
+
+            # Rows with no element text may still carry direct line-item values
+            # (sq_ft / price_per_sf / quantity / price_per_pc / labor_hours).
             if not elem_col:
+                if area_val > 0:
+                    current_li.sq_ft = area_val
+                if area_price > 0:
+                    current_li.price_per_sf = area_price
+                if qty_val > 0:
+                    current_li.quantity = qty_val
+                if pc_price > 0:
+                    current_li.price_per_pc = pc_price
+                if labor_hrs > 0:
+                    current_li.labor_hours = labor_hrs
                 continue
 
             mat_name, entry_notes, elem_desc = _parse_element_text(elem_col)
 
             if elem_desc and not current_li.element_notes:
                 current_li.element_notes = elem_desc
-
-            area_val = _parse_float(area_raw)
-            area_price = _parse_float(area_price_raw)
-            qty_val = _parse_float(qty_raw)
-            pc_price = _parse_float(pc_price_raw)
-            labor_hrs = _parse_float(labor_raw)
 
             hint = ""
             mat_category = ""

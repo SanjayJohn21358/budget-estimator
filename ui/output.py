@@ -7,6 +7,7 @@ from datetime import datetime
 
 import pandas as pd
 import streamlit as st
+from streamlit_sortables import sort_items
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
@@ -62,6 +63,28 @@ def _render_output_line_item(
         expanded=True,
     ):
         if li.entries:
+            if len(li.entries) > 1:
+                st.caption("Drag to reorder materials")
+                sortable_labels = [
+                    (
+                        f"{entry.material_name} • ${entry.total_cost:,.2f} "
+                        f"• #{entry.ui_key[:6]}"
+                    )
+                    for entry in li.entries
+                ]
+                sorted_labels = sort_items(
+                    sortable_labels,
+                    key=f"out_sort_{li_idx}",
+                )
+                if sorted_labels != sortable_labels:
+                    entry_by_label = {
+                        label: entry
+                        for label, entry in zip(sortable_labels, li.entries)
+                    }
+                    li.entries = [entry_by_label[label] for label in sorted_labels]
+                    _save(estimate)
+                    st.rerun()
+
             _col_w = [2.8, 1.0, 0.8, 0.8, 0.8, 1.2, 0.5]
             h1, h2, h3, h4, h5, h6, h7 = st.columns(_col_w)
             h1.markdown("**Material**")
@@ -73,6 +96,7 @@ def _render_output_line_item(
             h7.markdown("**Del**")
 
             for e_idx, entry in enumerate(li.entries):
+                entry_key = entry.ui_key
                 e_hint = entry.unit_hint or ""
                 is_area_entry = e_hint in AREA_HINTS or (
                     entry.area_value > 0 and entry.quantity == 0
@@ -94,7 +118,7 @@ def _render_output_line_item(
                         min_value=0.0,
                         value=entry.area_value,
                         step=1.0,
-                        key=f"out_area_{li_idx}_{e_idx}",
+                        key=f"out_area_{li_idx}_{entry_key}",
                         label_visibility="collapsed",
                     )
                     if updated_area != entry.area_value:
@@ -122,7 +146,7 @@ def _render_output_line_item(
                         min_value=0.0,
                         value=entry.quantity,
                         step=1.0,
-                        key=f"out_qty_{li_idx}_{e_idx}",
+                        key=f"out_qty_{li_idx}_{entry_key}",
                         label_visibility="collapsed",
                     )
                     if updated_qty != entry.quantity:
@@ -136,7 +160,7 @@ def _render_output_line_item(
 
                 c6.write(f"**${entry.total_cost:,.2f}**")
 
-                if c7.button("🗑️", key=f"out_del_{li_idx}_{e_idx}"):
+                if c7.button("🗑️", key=f"out_del_{li_idx}_{entry_key}"):
                     li.entries.pop(e_idx)
                     _save(estimate)
                     st.rerun()
@@ -618,10 +642,7 @@ def _export_to_sheets(
     """Overwrite the existing estimate tab (or create one) with current data."""
     try:
         service = SheetsService(sheet_config)
-        tab_title = (
-            f"Estimate - {estimate.address or 'Project'}"
-            f" - {datetime.now():%Y-%m-%d}"
-        )
+        tab_title = f"Estimate - {estimate.address or 'Project'}"
         url = service.export_estimate_to_sheet(
             tab_title=tab_title,
             estimate=estimate,

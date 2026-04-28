@@ -132,8 +132,7 @@ def _on_refresh_prices() -> None:
 
 def _on_reset_cart() -> None:
     """Wipe the estimate from session state; it will be recreated on rerun."""
-    if "estimate" in st.session_state:
-        del st.session_state["estimate"]
+    _clear_estimate_session_state()
     st.toast("🗑️ Cart cleared!")
 
 
@@ -145,10 +144,7 @@ def _export_to_sheets_sidebar(
     """Export estimate to Google Sheets (sidebar variant)."""
     try:
         service = SheetsService(sheet_config)
-        tab_title = (
-            f"Estimate - {estimate.address or 'Project'}"
-            f" - {datetime.now():%Y-%m-%d}"
-        )
+        tab_title = f"Estimate - {estimate.address or 'Project'}"
         url = service.export_estimate_to_sheet(
             tab_title=tab_title,
             estimate=estimate,
@@ -166,6 +162,75 @@ def _request_load_estimate() -> None:
     selected = st.session_state.get("load_estimate_select", "")
     if selected:
         st.session_state["_pending_import"] = selected
+
+
+def _clear_estimate_session_state() -> None:
+    """Clear estimate + estimate-related widget/cache keys from session state.
+
+    This prevents stale widget values from a previous estimate from leaking into
+    a newly loaded estimate when line item counts/keys overlap.
+    """
+    exact_keys = {
+        "estimate",
+        "address",
+        "budget",
+        "access",
+        "project_description",
+        "output_writeup",
+        "pdf_descriptions",
+        "_last_autosave_ts",
+        "_sortables_missing_warned",
+    }
+    prefix_keys = (
+        # Interactive mode
+        "new_section_name",
+        "sec_color_",
+        "confirm_del_sec_",
+        "li_type_",
+        "li_notes_new_",
+        "li_desc_new_",
+        "create_li_",
+        "li_notes_",
+        "li_elem_",
+        "confirm_del_li_",
+        "del_li_",
+        "cat_",
+        "mat_",
+        "add_qty_",
+        "notes_",
+        "labor_item_",
+        "_price_mat_",
+        "price_input_",
+        "add_length_ft_",
+        "add_item_",
+        "cart_sort_",
+        "cart_area_",
+        "cart_qty_",
+        "cart_labor_",
+        "del_",
+        "custom_mat_name_",
+        "custom_mat_cat_",
+        "custom_pricing_mode_",
+        "custom_qty_pc_",
+        "custom_price_pc_",
+        "custom_qty_area_",
+        "custom_price_area_",
+        "custom_notes_",
+        "add_custom_material_",
+        "dump_",
+        # Output mode
+        "out_sort_",
+        "out_area_",
+        "out_qty_",
+        "out_del_",
+    )
+
+    keys_to_clear = set(exact_keys)
+    keys_to_clear.update(
+        key for key in st.session_state if key.startswith(prefix_keys)
+    )
+    for key in keys_to_clear:
+        st.session_state.pop(key, None)
 
 
 # ---------------------------------------------------------------------------
@@ -203,10 +268,7 @@ def _autosave_fragment(cost_cfg: CostConfig, sheet_cfg: SheetConfig) -> None:
 
     try:
         service = SheetsService(sheet_cfg)
-        tab_title = (
-            f"Estimate - {estimate.address or 'Project'}"
-            f" - {datetime.now():%Y-%m-%d}"
-        )
+        tab_title = f"Estimate - {estimate.address or 'Project'}"
         service.export_estimate_to_sheet(
             tab_title=tab_title,
             estimate=estimate,
@@ -257,6 +319,7 @@ def main() -> None:
     pending_tab = st.session_state.pop("_pending_import", None)
     if pending_tab:
         try:
+            _clear_estimate_session_state()
             service = SheetsService(sheet_cfg)
             est = service.import_estimate_from_sheet(
                 pending_tab, pricing_guide=pricing_guide

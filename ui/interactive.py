@@ -3,10 +3,6 @@
 from __future__ import annotations
 
 import streamlit as st
-try:
-    from streamlit_sortables import sort_items as _sortable_items
-except ModuleNotFoundError:
-    _sortable_items = None
 
 from config import CostConfig
 from models import (
@@ -43,20 +39,6 @@ def _ensure_sections(estimate: ProjectEstimate) -> None:
 
 
 _DEFAULT_SECTION_COLOR = "#2E7D5F"
-_SORTABLES_WARNING_KEY = "_sortables_missing_warned"
-
-
-def _sort_items(items: list[str], key: str) -> list[str]:
-    """Sort using drag-drop widget when available; otherwise keep order."""
-    if _sortable_items is None:
-        if not st.session_state.get(_SORTABLES_WARNING_KEY):
-            st.info(
-                "Drag-to-reorder is unavailable because `streamlit-sortables` "
-                "is not installed in this environment."
-            )
-            st.session_state[_SORTABLES_WARNING_KEY] = True
-        return items
-    return _sortable_items(items, key=key)
 
 
 def _section_header_html(name: str, color: str, summary: str) -> str:
@@ -75,6 +57,30 @@ def _section_header_html(name: str, color: str, summary: str) -> str:
         f"</span>"
         f"</div>"
     )
+
+
+def _move_line_item_within_section(
+    estimate: ProjectEstimate,
+    li_idx: int,
+    *,
+    direction: int,
+) -> bool:
+    """Move a line item up/down, constrained to its section."""
+    if li_idx < 0 or li_idx >= len(estimate.line_items):
+        return False
+
+    li = estimate.line_items[li_idx]
+    target_idx = li_idx + direction
+    if target_idx < 0 or target_idx >= len(estimate.line_items):
+        return False
+    if estimate.line_items[target_idx].section != li.section:
+        return False
+
+    estimate.line_items[li_idx], estimate.line_items[target_idx] = (
+        estimate.line_items[target_idx],
+        estimate.line_items[li_idx],
+    )
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -303,8 +309,8 @@ def _render_line_item(
     label = f"**{li.name}**{subtitle} ({items_tag}){badge}"
 
     with st.expander(label, expanded=has_content):
-        # ---- Line item notes, description & delete ----
-        n1, n2, n_del = st.columns([2, 2, 0.4])
+        # ---- Line item notes, description, move & delete ----
+        n1, n2, n_up, n_down, n_del = st.columns([2, 2, 0.5, 0.5, 0.5])
         li.notes = n1.text_input(
             "Line Item Notes",
             value=li.notes,
@@ -315,7 +321,35 @@ def _render_line_item(
             value=li.element_notes,
             key=f"li_elem_{li_idx}",
         )
+        n_up.markdown("<br>", unsafe_allow_html=True)
+        n_down.markdown("<br>", unsafe_allow_html=True)
         n_del.markdown("<br>", unsafe_allow_html=True)
+        can_move_li_up = (
+            li_idx > 0
+            and estimate.line_items[li_idx - 1].section == li.section
+        )
+        can_move_li_down = (
+            li_idx < len(estimate.line_items) - 1
+            and estimate.line_items[li_idx + 1].section == li.section
+        )
+        if n_up.button(
+            "⬆️",
+            key=f"li_up_{li_idx}",
+            help="Move line item up",
+            disabled=not can_move_li_up,
+        ):
+            if _move_line_item_within_section(estimate, li_idx, direction=-1):
+                _save(estimate)
+                st.rerun()
+        if n_down.button(
+            "⬇️",
+            key=f"li_down_{li_idx}",
+            help="Move line item down",
+            disabled=not can_move_li_down,
+        ):
+            if _move_line_item_within_section(estimate, li_idx, direction=1):
+                _save(estimate)
+                st.rerun()
         if li.entries:
             with n_del.popover("🗑️"):
                 mat_word = "material" if entry_count == 1 else "materials"
@@ -516,31 +550,9 @@ def _render_line_item(
 
         # ---- Material entries table ----
         if li.entries:
-            if len(li.entries) > 1:
-                st.caption("Drag to reorder materials")
-                sortable_labels = [
-                    (
-                        f"{entry.material_name} • ${entry.total_cost:,.2f} "
-                        f"• #{entry.ui_key[:6]}"
-                    )
-                    for entry in li.entries
-                ]
-                sorted_labels = _sort_items(
-                    sortable_labels,
-                    key=f"cart_sort_{li_idx}",
-                )
-                if sorted_labels != sortable_labels:
-                    entry_by_label = {
-                        label: entry
-                        for label, entry in zip(sortable_labels, li.entries)
-                    }
-                    li.entries = [entry_by_label[label] for label in sorted_labels]
-                    _save(estimate)
-                    st.rerun()
-
-            _col_w = [2.6, 0.9, 0.8, 0.8, 0.8, 1.1, 0.8, 1.4, 0.5]
+            _col_w = [2.6, 0.9, 0.8, 0.8, 0.8, 1.1, 0.8, 1.4, 0.5, 0.5, 0.5]
             (hdr1, hdr2, hdr3, hdr4, hdr5,
-             hdr6, hdr7, hdr8, hdr9) = st.columns(_col_w)
+             hdr6, hdr7, hdr8, hdr9, hdr10, hdr11) = st.columns(_col_w)
             hdr1.markdown("**Material**")
             hdr2.markdown("**SqFt/LF**")
             hdr3.markdown("**$/sf**")
@@ -549,7 +561,9 @@ def _render_line_item(
             hdr6.markdown("**Total**")
             hdr7.markdown("**Labor**")
             hdr8.markdown("**Notes**")
-            hdr9.markdown("**Del**")
+            hdr9.markdown("**Up**")
+            hdr10.markdown("**Dn**")
+            hdr11.markdown("**Del**")
 
             for e_idx, entry in enumerate(li.entries):
                 entry_key = entry.ui_key
@@ -562,7 +576,7 @@ def _render_line_item(
                 )
 
                 (c1, c2, c3, c4, c5,
-                 c6, c7, c8, c9) = st.columns(_col_w)
+                 c6, c7, c8, c9, c10, c11) = st.columns(_col_w)
 
                 mat_display = entry.material_name
                 if e_hint:
@@ -648,7 +662,33 @@ def _render_line_item(
                     _save(estimate)
                     st.rerun()
 
-                if c9.button("🗑️", key=f"del_{li_idx}_{entry_key}"):
+                can_move_entry_up = e_idx > 0
+                can_move_entry_down = e_idx < len(li.entries) - 1
+                if c9.button(
+                    "⬆️",
+                    key=f"entry_up_{li_idx}_{entry_key}",
+                    disabled=not can_move_entry_up,
+                ):
+                    li.entries[e_idx], li.entries[e_idx - 1] = (
+                        li.entries[e_idx - 1],
+                        li.entries[e_idx],
+                    )
+                    _save(estimate)
+                    st.rerun()
+
+                if c10.button(
+                    "⬇️",
+                    key=f"entry_down_{li_idx}_{entry_key}",
+                    disabled=not can_move_entry_down,
+                ):
+                    li.entries[e_idx], li.entries[e_idx + 1] = (
+                        li.entries[e_idx + 1],
+                        li.entries[e_idx],
+                    )
+                    _save(estimate)
+                    st.rerun()
+
+                if c11.button("🗑️", key=f"del_{li_idx}_{entry_key}"):
                     li.entries.pop(e_idx)
                     _save(estimate)
                     st.rerun()

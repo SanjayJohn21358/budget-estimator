@@ -498,7 +498,9 @@ class SheetsService:
                             elem_text += f" — {li.element_notes}"
 
                         if entry.length_feet and entry.length_feet > 0:
-                            entry_area = entry.quantity * entry.length_feet
+                            # Keep linear entries consistent with in-app summary:
+                            # D column stores per-piece length; qty is separate in F.
+                            entry_area = entry.length_feet
                             entry_area_price = entry.cost_per_unit
                             entry_qty = entry.quantity if entry.quantity > 0 else ""
                             entry_cost = ""
@@ -702,18 +704,17 @@ def _build_entry_from_columns(
 
     Detection logic:
     - If the pricing guide says the material is linear (hint in LINEAR_HINTS)
-      and both area and qty are present: linear entry (length = area / qty).
+      and both area and qty are present: linear entry (length = area).
     - If area > 0 and no linear hint: area entry.
     - Otherwise: piece entry.
     """
     if hint in LINEAR_HINTS and area_val > 0 and qty_val > 0:
-        length = area_val / qty_val if qty_val else 0.0
         return LineItemEntry(
             material_name=mat_name,
             category=category,
             cost_per_unit=area_price,
             quantity=qty_val,
-            length_feet=length,
+            length_feet=area_val,
             unit_hint=hint,
             notes=entry_notes,
             labor_hours=labor_hours,

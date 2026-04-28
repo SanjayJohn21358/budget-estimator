@@ -125,9 +125,17 @@ def _render_output_line_item(
                         entry.area_value = updated_area
                         _save(estimate)
                 elif has_length:
-                    c2.write(
-                        f"{entry.quantity * (entry.length_feet or 0):.1f}"
+                    updated_length = c2.number_input(
+                        "Length",
+                        min_value=0.0,
+                        value=float(entry.length_feet or 0.0),
+                        step=0.5,
+                        key=f"out_area_{li_idx}_{entry_key}",
+                        label_visibility="collapsed",
                     )
+                    if updated_length != (entry.length_feet or 0.0):
+                        entry.length_feet = updated_length
+                        _save(estimate)
                 else:
                     c2.write("—")
 

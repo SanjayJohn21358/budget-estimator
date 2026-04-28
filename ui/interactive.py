@@ -636,7 +636,17 @@ def _render_line_item(
                     _save(estimate)
                     st.rerun()
 
-                c8.write(entry.notes or "—")
+                updated_notes = c8.text_input(
+                    "Notes",
+                    value=entry.notes,
+                    key=f"cart_notes_{li_idx}_{entry_key}",
+                    placeholder="Optional notes",
+                    label_visibility="collapsed",
+                )
+                if updated_notes != entry.notes:
+                    entry.notes = updated_notes
+                    _save(estimate)
+                    st.rerun()
 
                 if c9.button("🗑️", key=f"del_{li_idx}_{entry_key}"):
                     li.entries.pop(e_idx)

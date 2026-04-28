@@ -207,6 +207,7 @@ def _clear_estimate_session_state() -> None:
         "cart_area_",
         "cart_qty_",
         "cart_labor_",
+        "cart_notes_",
         "del_",
         "custom_mat_name_",
         "custom_mat_cat_",

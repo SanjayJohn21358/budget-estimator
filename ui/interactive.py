@@ -248,12 +248,8 @@ def render_interactive_mode(
                             insert_at = idx
                             break
                     estimate.line_items.insert(insert_at, new_item)
-                    # Reset add-line-item inputs after successful add.
-                    st.session_state[f"li_type_{sec_idx}"] = (
-                        base_li_types[0] if base_li_types else base
-                    )
-                    st.session_state[f"li_notes_new_{sec_idx}"] = ""
-                    st.session_state[f"li_desc_new_{sec_idx}"] = ""
+                    # Avoid writing widget-backed keys here: Streamlit raises
+                    # if a key is mutated after that widget is instantiated.
                     _save(estimate)
                     st.rerun()
 
@@ -511,20 +507,8 @@ def _render_line_item(
                         use_dynamic_pricing=not lock_price,
                     )
                 li.entries.append(entry)
-                # Reset add-material inputs after successful add.
-                st.session_state[f"cat_{li_idx}"] = "All Categories"
-                st.session_state[f"mat_{li_idx}"] = "— Select a material —"
-                st.session_state[f"add_qty_{li_idx}"] = 1.0
-                st.session_state[f"notes_{li_idx}"] = ""
-                st.session_state[f"labor_item_{li_idx}"] = 0.0
-                st.session_state[f"add_length_ft_{li_idx}"] = 8.0
-                prev_mat_name = st.session_state.pop(
-                    f"_price_mat_{li_idx}", None
-                )
-                if prev_mat_name:
-                    st.session_state.pop(
-                        f"price_input_{li_idx}_{prev_mat_name}", None
-                    )
+                # Avoid writing widget-backed keys here: Streamlit raises
+                # if a key is mutated after that widget is instantiated.
                 _save(estimate)
                 st.rerun()
             else:

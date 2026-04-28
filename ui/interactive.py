@@ -572,7 +572,8 @@ def _render_line_item(
                     entry.area_value > 0 and entry.quantity == 0
                 )
                 has_length = (
-                    entry.length_feet is not None and entry.length_feet > 0
+                    e_hint in LINEAR_HINTS
+                    or entry.length_feet is not None
                 )
 
                 (c1, c2, c3, c4, c5,

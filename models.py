@@ -6,7 +6,7 @@ from uuid import uuid4
 from typing import Optional
 
 import pandas as pd
-from pydantic import BaseModel, Field, computed_field
+from pydantic import BaseModel, Field, PrivateAttr, computed_field
 
 from config import CostConfig
 
@@ -61,18 +61,34 @@ class PricingGuide(BaseModel):
 
     categories: dict[str, list[Material]] = Field(default_factory=dict)
 
+    # Lazy lookup caches. Kept as PrivateAttr so they don't leak into
+    # model_dump and are rebuilt cheaply after model_validate / pickling.
+    # Hot path: recalculate_estimate calls get_material_by_name once per
+    # entry on every rerun — for an estimate with hundreds of entries the
+    # old O(M) scan dominated the rerun time on the interactive tab.
+    _all_materials_cache: Optional[list[Material]] = PrivateAttr(default=None)
+    _name_lookup_cache: Optional[dict[str, Material]] = PrivateAttr(default=None)
+
     @property
     def all_materials(self) -> list[Material]:
-        """Flat list of every material across all categories."""
-        return [m for mats in self.categories.values() for m in mats]
+        """Flat list of every material across all categories (cached)."""
+        if self._all_materials_cache is None:
+            self._all_materials_cache = [
+                m for mats in self.categories.values() for m in mats
+            ]
+        return self._all_materials_cache
+
+    def _name_lookup(self) -> dict[str, Material]:
+        """Build (once) and return the case-insensitive name → Material index."""
+        if self._name_lookup_cache is None:
+            self._name_lookup_cache = {
+                m.name.lower().strip(): m for m in self.all_materials
+            }
+        return self._name_lookup_cache
 
     def get_material_by_name(self, name: str) -> Optional[Material]:
-        """Case-insensitive lookup by material name."""
-        name_lower = name.lower().strip()
-        for mat in self.all_materials:
-            if mat.name.lower().strip() == name_lower:
-                return mat
-        return None
+        """Case-insensitive lookup by material name (O(1) after first call)."""
+        return self._name_lookup().get(name.lower().strip())
 
     def search_materials(self, query: str) -> list[Material]:
         """Search materials whose name contains the query (case-insensitive)."""
@@ -246,13 +262,6 @@ class ProjectEstimate(BaseModel):
             + self.total_dump_cost(config),
             2,
         )
-
-    @computed_field  # type: ignore[misc]
-    @property
-    def project_estimate_total(self) -> float:
-        """Quick total using default config (for serialization)."""
-        cfg = CostConfig()
-        return self.grand_total(cfg)
 
     def budget_delta(self, config: CostConfig) -> float:
         """Positive = under budget, negative = over budget."""

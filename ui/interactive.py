@@ -129,6 +129,7 @@ def render_interactive_mode(
             name = new_sec.strip().upper() or "NEW SECTION"
             if name not in estimate.sections:
                 estimate.sections.append(name)
+                st.toast(f"📁 Created section: {name}")
                 _save(estimate)
                 st.rerun()
             else:
@@ -267,6 +268,7 @@ def render_interactive_mode(
                     estimate.line_items.insert(insert_at, new_item)
                     # Avoid writing widget-backed keys here: Streamlit raises
                     # if a key is mutated after that widget is instantiated.
+                    st.toast(f"➕ Created line item: {new_item.name}")
                     _save(estimate)
                     st.rerun()
 
@@ -564,6 +566,7 @@ def _render_line_item(
                 li.entries.append(entry)
                 # Avoid writing widget-backed keys here: Streamlit raises
                 # if a key is mutated after that widget is instantiated.
+                st.toast(f"✅ Added {selected_mat.name} to {li.name}")
                 _save(estimate)
                 st.rerun()
             else:
@@ -823,6 +826,7 @@ def _render_line_item(
                             use_dynamic_pricing=False,
                         )
                     li.entries.append(custom_entry)
+                    st.toast(f"✅ Added {custom_name} to {li.name}")
                     _save(estimate)
                     st.rerun()
 

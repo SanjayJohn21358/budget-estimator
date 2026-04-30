@@ -169,6 +169,8 @@ class LineItemEntry(BaseModel):
 class LineItem(BaseModel):
     """One row / section in the output estimate (e.g. 'Fence', 'Plants')."""
 
+    # Persistent UI identifier so Streamlit widget keys stay stable after reordering.
+    ui_key: str = Field(default_factory=lambda: uuid4().hex)
     name: str
     notes: str = ""
     element_notes: str = ""

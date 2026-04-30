@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 from datetime import datetime
+from uuid import uuid4
 
 import pandas as pd
 import streamlit as st
@@ -50,6 +51,8 @@ def _render_output_line_item(
 ) -> None:
     """Render one line item in the output cart detail."""
     from models import LineItem  # noqa: F811 — deferred to avoid circular
+    li_widget_key = (getattr(li, "ui_key", "") or "").strip() or f"li_{uuid4().hex}"
+    li.ui_key = li_widget_key
 
     li_total = li.total_element_price(config)
     subtitle = ""
@@ -74,7 +77,7 @@ def _render_output_line_item(
                 ]
                 sorted_labels = sort_items(
                     sortable_labels,
-                    key=f"out_sort_{li_idx}",
+                    key=f"out_sort_{li_widget_key}",
                 )
                 if sorted_labels != sortable_labels:
                     entry_by_label = {
@@ -119,7 +122,7 @@ def _render_output_line_item(
                         min_value=0.0,
                         value=entry.area_value,
                         step=1.0,
-                        key=f"out_area_{li_idx}_{entry_key}",
+                        key=f"out_area_{li_widget_key}_{entry_key}",
                         label_visibility="collapsed",
                     )
                     if updated_area != entry.area_value:
@@ -131,7 +134,7 @@ def _render_output_line_item(
                         min_value=0.0,
                         value=float(entry.length_feet or 0.0),
                         step=0.5,
-                        key=f"out_area_{li_idx}_{entry_key}",
+                        key=f"out_area_{li_widget_key}_{entry_key}",
                         label_visibility="collapsed",
                     )
                     if updated_length != (entry.length_feet or 0.0):
@@ -155,7 +158,7 @@ def _render_output_line_item(
                         min_value=0.0,
                         value=entry.quantity,
                         step=1.0,
-                        key=f"out_qty_{li_idx}_{entry_key}",
+                        key=f"out_qty_{li_widget_key}_{entry_key}",
                         label_visibility="collapsed",
                     )
                     if updated_qty != entry.quantity:
@@ -169,7 +172,7 @@ def _render_output_line_item(
 
                 c6.write(f"**${entry.total_cost:,.2f}**")
 
-                if c7.button("🗑️", key=f"out_del_{li_idx}_{entry_key}"):
+                if c7.button("🗑️", key=f"out_del_{li_widget_key}_{entry_key}"):
                     li.entries.pop(e_idx)
                     _save(estimate)
                     st.rerun()

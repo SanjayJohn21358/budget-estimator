@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from uuid import uuid4
+
 import streamlit as st
 
 from config import CostConfig
@@ -81,6 +83,22 @@ def _move_line_item_within_section(
         estimate.line_items[li_idx],
     )
     return True
+
+
+def _line_item_insert_index(
+    estimate: ProjectEstimate,
+    section_name: str,
+) -> int:
+    """Return insertion index that preserves section grouping order."""
+    sec_order = {name: idx for idx, name in enumerate(estimate.sections)}
+    target_order = sec_order.get(section_name, len(sec_order))
+    insert_at = len(estimate.line_items)
+    for idx, existing in enumerate(estimate.line_items):
+        existing_order = sec_order.get(existing.section, len(sec_order))
+        if existing_order > target_order:
+            insert_at = idx
+            break
+    return insert_at
 
 
 # ---------------------------------------------------------------------------
@@ -245,14 +263,7 @@ def render_interactive_mode(
                     )
                     # Keep line items grouped by section order so exports don't
                     # emit duplicate section headers when revisiting a section.
-                    sec_order = {name: idx for idx, name in enumerate(estimate.sections)}
-                    target_order = sec_order.get(section_name, len(sec_order))
-                    insert_at = len(estimate.line_items)
-                    for idx, existing in enumerate(estimate.line_items):
-                        existing_order = sec_order.get(existing.section, len(sec_order))
-                        if existing_order > target_order:
-                            insert_at = idx
-                            break
+                    insert_at = _line_item_insert_index(estimate, section_name)
                     estimate.line_items.insert(insert_at, new_item)
                     # Avoid writing widget-backed keys here: Streamlit raises
                     # if a key is mutated after that widget is instantiated.
@@ -294,6 +305,8 @@ def _render_line_item(
     category_names: list[str],
 ) -> None:
     """Render a single line item as a nested expander with materials, labor, etc."""
+    li_widget_key = (getattr(li, "ui_key", "") or "").strip() or f"li_{uuid4().hex}"
+    li.ui_key = li_widget_key
 
     entry_count = len(li.entries)
     li_total = li.total_element_price(config)
@@ -314,12 +327,12 @@ def _render_line_item(
         li.notes = n1.text_input(
             "Line Item Notes",
             value=li.notes,
-            key=f"li_notes_{li_idx}",
+            key=f"li_notes_{li_widget_key}",
         )
         li.element_notes = n2.text_input(
             "Description",
             value=li.element_notes,
-            key=f"li_elem_{li_idx}",
+            key=f"li_elem_{li_widget_key}",
         )
         n_up.markdown("<br>", unsafe_allow_html=True)
         n_down.markdown("<br>", unsafe_allow_html=True)
@@ -334,7 +347,7 @@ def _render_line_item(
         )
         if n_up.button(
             "⬆️",
-            key=f"li_up_{li_idx}",
+            key=f"li_up_{li_widget_key}",
             help="Move line item up",
             disabled=not can_move_li_up,
         ):
@@ -343,7 +356,7 @@ def _render_line_item(
                 st.rerun()
         if n_down.button(
             "⬇️",
-            key=f"li_down_{li_idx}",
+            key=f"li_down_{li_widget_key}",
             help="Move line item down",
             disabled=not can_move_li_down,
         ):
@@ -359,13 +372,17 @@ def _render_line_item(
                 )
                 if st.button(
                     "Confirm Delete",
-                    key=f"confirm_del_li_{li_idx}",
+                    key=f"confirm_del_li_{li_widget_key}",
                     type="primary",
                 ):
                     estimate.line_items.pop(li_idx)
                     _save(estimate)
                     st.rerun()
-        elif n_del.button("🗑️", key=f"del_li_{li_idx}", help="Delete this line item"):
+        elif n_del.button(
+            "🗑️",
+            key=f"del_li_{li_widget_key}",
+            help="Delete this line item",
+        ):
             estimate.line_items.pop(li_idx)
             _save(estimate)
             st.rerun()
@@ -377,7 +394,7 @@ def _render_line_item(
         selected_category = add_col_cat.selectbox(
             "Material Category",
             options=["All Categories"] + category_names,
-            key=f"cat_{li_idx}",
+            key=f"cat_{li_widget_key}",
         )
 
         if selected_category == "All Categories":
@@ -395,7 +412,7 @@ def _render_line_item(
         selected_material_label = add_col_mat.selectbox(
             "Material",
             options=["— Select a material —"] + material_options,
-            key=f"mat_{li_idx}",
+            key=f"mat_{li_widget_key}",
             help="Pick a material to add to this line item",
         )
 
@@ -422,12 +439,12 @@ def _render_line_item(
             min_value=0.01,
             value=1.0,
             step=1.0,
-            key=f"add_qty_{li_idx}",
+            key=f"add_qty_{li_widget_key}",
         )
 
         new_notes = add_col_notes.text_input(
             "Notes (optional)",
-            key=f"notes_{li_idx}",
+            key=f"notes_{li_widget_key}",
             placeholder="e.g. front yard only",
         )
 
@@ -436,7 +453,7 @@ def _render_line_item(
             min_value=0.0,
             value=0.0,
             step=0.5,
-            key=f"labor_item_{li_idx}",
+            key=f"labor_item_{li_widget_key}",
             help="Labor hours associated with this specific item",
         )
 
@@ -459,12 +476,14 @@ def _render_line_item(
             else:
                 default_price = sheet_price
 
-            price_key = f"price_input_{li_idx}_{selected_mat.name}"
-            prev_price_mat = st.session_state.get(f"_price_mat_{li_idx}")
+            price_key = f"price_input_{li_widget_key}_{selected_mat.name}"
+            prev_price_mat = st.session_state.get(
+                f"_price_mat_{li_widget_key}"
+            )
             if prev_price_mat and prev_price_mat != selected_mat.name:
-                old_key = f"price_input_{li_idx}_{prev_price_mat}"
+                old_key = f"price_input_{li_widget_key}_{prev_price_mat}"
                 st.session_state.pop(old_key, None)
-            st.session_state[f"_price_mat_{li_idx}"] = selected_mat.name
+            st.session_state[f"_price_mat_{li_widget_key}"] = selected_mat.name
 
             chosen_unit_price = st.number_input(
                 "Unit Price",
@@ -487,7 +506,7 @@ def _render_line_item(
                 min_value=0.01,
                 value=8.0,
                 step=0.5,
-                key=f"add_length_ft_{li_idx}",
+                key=f"add_length_ft_{li_widget_key}",
                 help="Length per piece; cost = unit price × quantity × length",
             )
 
@@ -495,7 +514,9 @@ def _render_line_item(
             "<br>", unsafe_allow_html=True
         )
         if add_col_btn.button(
-            "Add Item", key=f"add_item_{li_idx}", type="primary"
+            "Add Item",
+            key=f"add_item_{li_widget_key}",
+            type="primary",
         ):
             if (
                 selected_material_label != "— Select a material —"
@@ -591,7 +612,7 @@ def _render_line_item(
                         min_value=0.0,
                         value=entry.area_value,
                         step=1.0,
-                        key=f"cart_area_{li_idx}_{entry_key}",
+                        key=f"cart_area_{li_widget_key}_{entry_key}",
                         label_visibility="collapsed",
                     )
                     if updated_area != entry.area_value:
@@ -604,7 +625,7 @@ def _render_line_item(
                         min_value=0.0,
                         value=float(entry.length_feet or 0.0),
                         step=0.5,
-                        key=f"cart_area_{li_idx}_{entry_key}",
+                        key=f"cart_area_{li_widget_key}_{entry_key}",
                         label_visibility="collapsed",
                     )
                     if updated_length != (entry.length_feet or 0.0):
@@ -631,7 +652,7 @@ def _render_line_item(
                         min_value=0.0,
                         value=entry.quantity,
                         step=1.0,
-                        key=f"cart_qty_{li_idx}_{entry_key}",
+                        key=f"cart_qty_{li_widget_key}_{entry_key}",
                         label_visibility="collapsed",
                     )
                     if updated_qty != entry.quantity:
@@ -652,7 +673,7 @@ def _render_line_item(
                     min_value=0.0,
                     value=entry.labor_hours,
                     step=0.5,
-                    key=f"cart_labor_{li_idx}_{entry_key}",
+                    key=f"cart_labor_{li_widget_key}_{entry_key}",
                     label_visibility="collapsed",
                 )
                 if updated_labor != entry.labor_hours:
@@ -663,7 +684,7 @@ def _render_line_item(
                 updated_notes = c8.text_input(
                     "Notes",
                     value=entry.notes,
-                    key=f"cart_notes_{li_idx}_{entry_key}",
+                    key=f"cart_notes_{li_widget_key}_{entry_key}",
                     placeholder="Optional notes",
                     label_visibility="collapsed",
                 )
@@ -676,7 +697,7 @@ def _render_line_item(
                 can_move_entry_down = e_idx < len(li.entries) - 1
                 if c9.button(
                     "⬆️",
-                    key=f"entry_up_{li_idx}_{entry_key}",
+                    key=f"entry_up_{li_widget_key}_{entry_key}",
                     disabled=not can_move_entry_up,
                 ):
                     li.entries[e_idx], li.entries[e_idx - 1] = (
@@ -688,7 +709,7 @@ def _render_line_item(
 
                 if c10.button(
                     "⬇️",
-                    key=f"entry_down_{li_idx}_{entry_key}",
+                    key=f"entry_down_{li_widget_key}_{entry_key}",
                     disabled=not can_move_entry_down,
                 ):
                     li.entries[e_idx], li.entries[e_idx + 1] = (
@@ -698,7 +719,7 @@ def _render_line_item(
                     _save(estimate)
                     st.rerun()
 
-                if c11.button("🗑️", key=f"del_{li_idx}_{entry_key}"):
+                if c11.button("🗑️", key=f"del_{li_widget_key}_{entry_key}"):
                     li.entries.pop(e_idx)
                     _save(estimate)
                     st.rerun()
@@ -716,19 +737,19 @@ def _render_line_item(
             cm1, cm2 = st.columns(2)
             custom_name = cm1.text_input(
                 "Custom Material Name",
-                key=f"custom_mat_name_{li_idx}",
+                key=f"custom_mat_name_{li_widget_key}",
                 placeholder="e.g. Misc plantings",
             )
             custom_category = cm2.text_input(
                 "Category (optional)",
-                key=f"custom_mat_cat_{li_idx}",
+                key=f"custom_mat_cat_{li_widget_key}",
                 placeholder="e.g. Plants/Lawn",
             )
 
             custom_pricing_mode = st.selectbox(
                 "Pricing Type",
                 options=["Per Piece", "Per Area (Sq Ft / LF / CY)"],
-                key=f"custom_pricing_mode_{li_idx}",
+                key=f"custom_pricing_mode_{li_widget_key}",
             )
 
             if custom_pricing_mode == "Per Piece":
@@ -738,14 +759,14 @@ def _render_line_item(
                     min_value=0.0,
                     value=0.0,
                     step=1.0,
-                    key=f"custom_qty_pc_{li_idx}",
+                    key=f"custom_qty_pc_{li_widget_key}",
                 )
                 custom_unit_price = cq2.number_input(
                     "$/pc",
                     min_value=0.0,
                     value=0.0,
                     step=0.01,
-                    key=f"custom_price_pc_{li_idx}",
+                    key=f"custom_price_pc_{li_widget_key}",
                 )
             else:
                 cq1, cq2 = st.columns(2)
@@ -754,26 +775,26 @@ def _render_line_item(
                     min_value=0.0,
                     value=0.0,
                     step=1.0,
-                    key=f"custom_qty_area_{li_idx}",
+                    key=f"custom_qty_area_{li_widget_key}",
                 )
                 custom_unit_price = cq2.number_input(
                     "$ per unit area",
                     min_value=0.0,
                     value=0.0,
                     step=0.01,
-                    key=f"custom_price_area_{li_idx}",
+                    key=f"custom_price_area_{li_widget_key}",
                 )
 
             custom_notes = st.text_input(
                 "Custom Notes (optional)",
-                key=f"custom_notes_{li_idx}",
+                key=f"custom_notes_{li_widget_key}",
                 placeholder="Any details to show on the estimate",
             )
 
             if st.button(
                 "Add Custom Material",
                 type="primary",
-                key=f"add_custom_material_{li_idx}",
+                key=f"add_custom_material_{li_widget_key}",
                 help="Create a custom material entry using the pricing above.",
             ):
                 if not custom_name:
@@ -814,7 +835,7 @@ def _render_line_item(
                 min_value=0,
                 value=li.dump_runs,
                 step=1,
-                key=f"dump_{li_idx}",
+                key=f"dump_{li_widget_key}",
             )
         )
         if updated_dump_runs != li.dump_runs:
